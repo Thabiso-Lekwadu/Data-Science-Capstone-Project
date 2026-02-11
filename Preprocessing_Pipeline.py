@@ -8,5 +8,7 @@ class pipeline:
     def impute_missing_values(df):
         pass
 
-    def
+    def table_structure(df):
+        pass
+
     def encode_categorical_variables(df):

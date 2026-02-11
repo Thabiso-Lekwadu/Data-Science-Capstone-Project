@@ -1,0 +1,49 @@
+This project aims to use the regional data from EasyData to create a Machine Learning model that can predict the crime hotspots
+in South Africa per region (Province, and Cluster/ Town).
+Exploration into the data will be done to find out which towns require intervention to fend off the crime.
+Multiple datasets will be explored to also find out the socio-economic factors that contribute to crime in those towns. This will include
+exploration into the unemployment rate, poverty levels, and education levels in those towns. The data will be visualized to find out the trends and patterns in the crime data.
+Features contributing to the crime hotspots will be identified from the multiple sources and consolidated into
+one dataset that will be used to train the Classification Machine Learning model.
+- We will see the Top 5 high crime spots,
+- at which time of the year does crime peak in those areas,
+- which type of crime is most prevalent in those areas,
+- and which socio-economic factors contribute to the crime in those areas.
+The consolidated dataset will include the target feature (Town/ Cluster) and the features that contribute to the crime in those areas.
+- Population density
+- Unemployment rate
+- Poverty levels
+- Education levels
+
+Plan:
+1. Data Collection: Collect the crime data and socio-economic data for the regions in South Africa from EasyData and other sources.
+2. Data Cleaning and Preprocessing: Clean the data by removing unnecessary rows and columns, handling missing values, fixing the table structure (Unpivoting),
+   encoding categorical variables, and normalizing numerical features.
+3. Exploratory Data Analysis: Visualize the data to identify trends and patterns in crime rates and socio-economic factors.
+4. Feature Selection: Identify the most relevant features that contribute to crime hotspots.
+5. Model Training: Train a Classification Machine Learning model using the consolidated dataset to predict crime hotspots.
+6. Model Evaluation: Evaluate the model's performance using appropriate metrics such as accuracy, precision, recall, and F1-score.
+7. Interpretation and Insights: Interpret the model's predictions and provide insights into the factors contributing to crime hotspots in South Africa.
+8. Conclusion: Summarize the findings and suggest potential interventions to reduce crime in the identified hotspots.
+
+Methodology:
+1. Data Collection: Use APIs
+2. Define an ETL pipeline to clean and preprocess the data (Data Lakehouse)
+3. Use data visualization libraries such as Matplotlib and Seaborn to explore the data and get Ad Hoc reports.
+4. Load transformed data to PowerBi for standard report.
+5. Design a FastAPI to serve the model predictions.
+6. Deploy the model and API to Azure for scalability and accessibility.
+7. Use Docker to containerize the application for easy deployment and management.
+
+Tech Stack:
+- Data Collection: Python, APIs
+- Data Cleaning and Preprocessing: Python, Pandas, NumPy
+- Exploratory Data Analysis: Python, Matplotlib, Seaborn
+- Feature Selection: Python, Scikit-learn
+- Model Training: Python, Scikit-learn
+- Model Evaluation: Python, Scikit-learn
+- Interpretation and Insights: Python, Jupyter Notebook
+- Conclusion: Python, Jupyter Notebook
+- Data Visualization: Power BI
+- API Development: FastAPI
+- Deployment: Azure, Docker

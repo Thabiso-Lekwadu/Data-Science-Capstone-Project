@@ -10,24 +10,22 @@ class preprocess(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X, y=None):
-        X = X[4:]
-        X = X.drop(range(5, 8))
-        X.columns = X.iloc[0]
-        X = X.iloc[1:]
-        X = X.rename(columns={'title': 'Date'})
-        X = X.set_index("Date")
-        X.index = pd.to_datetime(X.index)
+        if not isinstance(X, list):
+            X = [X]
+        processed_dfs = []
 
-        return X
+        for df in X:
+            # Create a copy to avoid modifying original data unexpectedly
+            # Your original cleaning logic applied to each individual dataframe
+            df.drop(columns=["unit", "source", "code"], inplace=True, errors='ignore')
+            df["value"] = df.fillna(0).value.astype('int')
+            df = df.rename(columns={'title': 'Date'})
+            df = df.set_index("Date")
 
-class imput_missing(BaseEstimator, TransformerMixin):
-    def fit(self, X, y=None):
-        return self
+            processed_dfs.append(df)
 
-    def transform(self, X, y=None):
-        # Convert all columns to numeric, turning invalid strings to NaN
-        X = X.fillna(0).round(0).astype(int)
-        return X
+        # Combine all processed dataframes into one single dataset
+        return pd.concat(processed_dfs)
 
 
 class table_structure(BaseEstimator, TransformerMixin):
@@ -35,10 +33,14 @@ class table_structure(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X, y=None):
-        X_transposed = X.T.reset_index().rename(columns={4: 'Region'})
-        id_vars = X_transposed.columns[0]
-        date_cols = X_transposed.columns[1:]
-        X_long = pd.melt(X_transposed, id_vars=id_vars, value_vars=date_cols, var_name='Date', value_name='Value')
+        # Assumes X is a list of DataFrames: [df1, df2, ..., dfN]
+        if not isinstance(X, list):
+            raise ValueError("Input X must be a list of DataFrames.")
+
+        X_long = pd.concat(X, ignore_index=True)
+        for col in X_long.select_dtypes(include="object").columns:
+            X_long[col] = X_long[col].str.strip()
+
         return X_long
 
 class data_split(BaseEstimator, TransformerMixin):
@@ -46,7 +48,7 @@ class data_split(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X_long, y=None):
-        X_long[["Province", "Cluster", "Type of Crime"]] = X_long["Region"].str.split("—", expand=True)
+        X_long[["Province", "Cluster", "Type of Crime"]] = X_long["title"].str.split("—", expand=True)
         X_long["Province"] = X_long["Province"].str.split(":", expand=True).drop(columns=0)
         X_long["Cluster"] = X_long["Cluster"].str.split(":", expand=True).drop(columns=0)
         return X_long
@@ -67,12 +69,12 @@ class feature_engineering(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X_long, y=None):
-        X_long.drop(columns="Region", inplace=True)
-        X_long["Date"] = pd.to_datetime(X_long["Date"])
-        X_long["Year"] = X_long["Date"].dt.year
-        X_long["Month"] = X_long["Date"].dt.month_name()
-        X_long["Day"] = X_long["Date"].dt.day_name()
-        X_long = X_long[["Date", "Year", "Month", "Day", "Province", "Cluster", "Type of Crime", "Value"]]
+        X_long.drop(columns="title", inplace=True)
+        X_long["date"] = pd.to_datetime(X_long["date"])
+        X_long["Year"] = X_long["date"].dt.year
+        X_long["Month"] = X_long["date"].dt.month_name()
+        X_long["Day"] = X_long["date"].dt.day_name()
+        X_long = X_long[["date", "Year", "Month", "Day", "Province", "Cluster", "Type of Crime", "value"]]
         return X_long
 
     # reference: NeuralNine Professional Preprocessing with Pipelines in Python

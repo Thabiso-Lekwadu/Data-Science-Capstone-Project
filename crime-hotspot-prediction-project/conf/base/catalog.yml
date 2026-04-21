@@ -1,0 +1,228 @@
+# --- RAW API sources ---
+crime_df1_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19053
+  freq: "A"
+  credentials: quantec_credentials
+
+crime_df2_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19058
+  freq: "A"
+  credentials: quantec_credentials
+
+crime_df3_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19059
+  freq: "A"
+  credentials: quantec_credentials
+
+population_density_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19268
+  freq: "A"
+  credentials: quantec_credentials
+
+poor_households_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19269
+  freq: "A"
+  credentials: quantec_credentials
+
+population_unemployment_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19265
+  freq: "A"
+  credentials: quantec_credentials
+
+pop_edu_1_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19270
+  freq: "A"
+  credentials: quantec_credentials
+
+pop_edu_2_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19271
+  freq: "A"
+  credentials: quantec_credentials
+
+pop_edu_3_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19272
+  freq: "A"
+  credentials: quantec_credentials
+
+pop_edu_4_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19273
+  freq: "A"
+  credentials: quantec_credentials
+
+pop_edu_5_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19274
+  freq: "A"
+  credentials: quantec_credentials
+
+pop_edu_6_raw:
+  type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
+  selection_pk: 19275
+  freq: "A"
+  credentials: quantec_credentials
+
+# --- Saved Excel files in 01_raw ---
+crime_df1:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/crime/crime_df1.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+crime_df2:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/crime/crime_df2.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+crime_df3:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/crime/crime_df3.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+population_density:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_density/population_density.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+poor_households:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/poverty_levels/poor_households.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+population_unemployment:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_unemployment/population_unemployment.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_1:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_edu/pop_edu_1.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_2:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_edu/pop_edu_2.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_3:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_edu/pop_edu_3.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_4:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_edu/pop_edu_4.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_5:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_edu/pop_edu_5.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_6:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/01_raw/pop_edu/pop_edu_6.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+
+# --- 02_intermediate ---
+crime_processed:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/02_intermediate/crime_processed.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+population_density_processed:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/02_intermediate/population_density_processed.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+poor_households_processed:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/02_intermediate/poor_households_processed.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+population_unemployment_processed:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/02_intermediate/population_unemployment_processed.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+pop_edu_processed:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/02_intermediate/pop_edu_processed.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+socioeconomic_processed:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/02_intermediate/socioeconomic_processed.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+# --- 03_primary ---
+master_dataset:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/03_primary/master_dataset.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl

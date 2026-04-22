@@ -218,7 +218,7 @@ socioeconomic_processed:
   load_args:
     engine: openpyxl
 
-# --- 03_primary ---
+# --- 03_primary dir---
 master_dataset:
   type: kedro_datasets.pandas.ExcelDataset
   filepath: data/03_primary/master_dataset.xlsx

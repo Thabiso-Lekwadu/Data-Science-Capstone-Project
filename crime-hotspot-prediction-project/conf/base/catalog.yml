@@ -1,3 +1,8 @@
+# =============================================================================
+# conf/base/catalog.yml  –  COMPLETE FILE
+# Replace your entire catalog.yml with this
+# =============================================================================
+
 # --- RAW API sources ---
 crime_df1_raw:
   type: crime_hotspot_prediction_project.datasets.api_dataset.APIDataset
@@ -71,7 +76,7 @@ pop_edu_6_raw:
   freq: "A"
   credentials: quantec_credentials
 
-# --- Saved Excel files in 01_raw ---
+# --- 01_raw ---
 crime_df1:
   type: kedro_datasets.pandas.ExcelDataset
   filepath: data/01_raw/crime/crime_df1.xlsx
@@ -168,7 +173,6 @@ pop_edu_6:
   load_args:
     engine: openpyxl
 
-
 # --- 02_intermediate ---
 crime_processed:
   type: kedro_datasets.pandas.ExcelDataset
@@ -218,10 +222,183 @@ socioeconomic_processed:
   load_args:
     engine: openpyxl
 
-# --- 03_primary dir---
+# --- 03_primary ---
 master_dataset:
   type: kedro_datasets.pandas.ExcelDataset
   filepath: data/03_primary/master_dataset.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+# --- 05_model_input: Crime-only splits ---
+crime_dataset_tree_train:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/crime_dataset_tree_train.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+crime_dataset_tree_test:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/crime_dataset_tree_test.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+crime_dataset_knn_train:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/crime_dataset_knn_train.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+crime_dataset_knn_test:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/crime_dataset_knn_test.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+# --- 05_model_input: Master (crime + socioeconomic) splits ---
+master_dataset_tree_train:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/master_dataset_tree_train.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+master_dataset_tree_test:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/master_dataset_tree_test.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+master_dataset_knn_train:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/master_dataset_knn_train.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+master_dataset_knn_test:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/05_model_input/master_dataset_knn_test.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+# --- 08_reporting ---
+experiment_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/experiment_comparison.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+label_mapping_crime_tree:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/label_mapping_crime_tree.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+label_mapping_crime_knn:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/label_mapping_crime_knn.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+label_mapping_master_tree:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/label_mapping_master_tree.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+label_mapping_master_knn:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/label_mapping_master_knn.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+# --- 08_reporting: Per-model result tables (intermediate, fed into consolidation) ---
+
+knn_crime_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/knn_crime_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+knn_master_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/knn_master_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+rf_crime_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/rf_crime_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+rf_master_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/rf_master_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+gbm_crime_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/gbm_crime_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+gbm_master_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/gbm_master_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+xgb_crime_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/xgb_crime_results.xlsx
+  save_args:
+    engine: openpyxl
+  load_args:
+    engine: openpyxl
+
+xgb_master_results:
+  type: kedro_datasets.pandas.ExcelDataset
+  filepath: data/08_reporting/xgb_master_results.xlsx
   save_args:
     engine: openpyxl
   load_args:

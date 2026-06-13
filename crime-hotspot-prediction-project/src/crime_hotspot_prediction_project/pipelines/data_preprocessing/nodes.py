@@ -1,4 +1,4 @@
-# src/crime_hotspot_prediction_project/pipelines/data_preprocessing/nodes.py
+# src/crime_hotspot_prediction_project/pipelines/data_preprocessing/model_training_nodes.py
 
 import pandas as pd
 from crime_hotspot_prediction_project.pipelines.data_preprocessing.transformers import (

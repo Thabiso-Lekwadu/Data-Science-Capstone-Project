@@ -1,4 +1,4 @@
-"""Page 3 — SAPS Command BI Dashboard."""
+"""Page 3 — SAPS Command BI Dashboard"""
 from __future__ import annotations
 import hashlib
 import numpy as np

@@ -1,8 +1,9 @@
-"""Page 2 — Model Performance Analysis.
+"""Page 2 — Model Performance Analysis
 
 Performance design:
 - All sklearn imports at module level (loaded once)
 - All expensive computations wrapped in @st.cache_data
+- PCA computed once and cached by (condition, data hash)
 - ROC/PR data computed once and cached
 - Figures built from cached data — only layout rerenders on interaction
 """
@@ -31,8 +32,6 @@ METRIC_LABELS = {
     "precision_macro": "Precision",
     "recall_macro":    "Recall",
 }
-SOCIO = ["population_density", "poor_households",
-         "population_unemployment", "population_education"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -87,7 +86,7 @@ def _cached_roc_data(results_hash: str, fres_json: str) -> dict:
     return out
 
 
-@st.cache_data(show_spinner=False)
+
 def _cached_roc_curves(roc_json: str, model: str, condition: str):
     """Compute one ROC curve from cached score data."""
     import json
@@ -103,7 +102,6 @@ def _cached_roc_curves(roc_json: str, model: str, condition: str):
     return {"fpr": fpr.tolist(), "tpr": tpr.tolist(), "auc": auc_val}
 
 
-@st.cache_data(show_spinner=False)
 def _cached_pr_curves(roc_json: str, model: str, condition: str):
     """Compute one PR curve from cached score data."""
     import json
@@ -262,6 +260,7 @@ def render(results_df: pd.DataFrame, PALETTE: list, PLOT_BASE: dict,
                                      showlegend=False, hoverinfo="skip"))
         auc_rows = []
         for i, (_, row) in enumerate(fres.iterrows()):
+            # Each curve computed and cached independently
             result = _cached_roc_curves(roc_json, row["model"], row["condition"])
             if result is None:
                 continue
@@ -323,7 +322,7 @@ def render(results_df: pd.DataFrame, PALETTE: list, PLOT_BASE: dict,
         st.plotly_chart(fig_pr, use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4 – FEATURE IMPORTANCE + CONFUSION MATRIX
+    # TAB 5 – FEATURE IMPORTANCE + CONFUSION MATRIX
     # ══════════════════════════════════════════════════════════════════════════
     with tab4:
         fa1, fa2 = st.columns(2)

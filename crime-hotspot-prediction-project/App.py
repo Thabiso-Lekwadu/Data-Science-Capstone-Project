@@ -1,6 +1,6 @@
 """
 Crime Hotspot Prediction – Intelligence Dashboard
-Run: streamlit run app.py
+Run: streamlit run App.py --server.port 8503
 """
 from __future__ import annotations
 import sys

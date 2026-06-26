@@ -1,0 +1,41 @@
+# Data — always mounted at runtime, never baked in
+data/
+logs/
+
+# Credentials only — the rest of conf/ MUST be in the image
+# conf/base/  ← kept (Kedro needs it)
+# conf/local/ ← kept as empty dir (Kedro needs it to exist)
+# Only the credentials file itself is excluded and mounted at runtime
+conf/local/credentials.yml
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.egg-info/
+dist/
+build/
+
+# Virtual environments and local env files
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Notebooks
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# Version control and IDE
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+.DS_Store

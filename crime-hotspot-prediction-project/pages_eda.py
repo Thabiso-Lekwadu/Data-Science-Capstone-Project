@@ -1,4 +1,4 @@
-"""Page 1 — Exploratory Data Analysis (Research Questions)."""
+"""Page 1 — Exploratory Data Analysis (Research Questions)"""
 from __future__ import annotations
 import hashlib
 import numpy as np

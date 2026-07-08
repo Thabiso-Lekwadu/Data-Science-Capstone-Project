@@ -2,92 +2,125 @@
 from kedro.pipeline import Pipeline, node, pipeline
 
 from .model_training_nodes import (
-    train_evaluate_knn_crime,
-    train_evaluate_knn_master,
+    compute_fold_boundaries,
     train_evaluate_rf_crime,
     train_evaluate_rf_master,
-    train_evaluate_gbm_crime,
-    train_evaluate_gbm_master,
     train_evaluate_xgb_crime,
     train_evaluate_xgb_master,
+    train_evaluate_lgbm_crime,
+    train_evaluate_lgbm_master,
+    train_evaluate_catboost_crime,
+    train_evaluate_catboost_master,
     consolidate_experiment_results,
+    summarize_experiment_results,
+    run_paired_significance_tests,
 )
 
 
 def create_pipeline(**kwargs) -> Pipeline:
     return pipeline(
         [
-            # --- KNN ---
+            # --- Shared fold boundaries (computed once, reused by every model/condition) ---
             node(
-                func=train_evaluate_knn_crime,
-                inputs=["crime_dataset_knn_train", "crime_dataset_knn_test"],
-                outputs="knn_crime_results",
-                name="train_evaluate_knn_crime_node",
-                tags=["model_training", "knn", "crime_only"],
+                func=compute_fold_boundaries,
+                inputs=dict(
+                    master_dataset_features="master_dataset_features",
+                    n_splits="params:n_splits",
+                ),
+                outputs="fold_boundaries",
+                name="compute_fold_boundaries_node",
+                tags=["model_training", "cv_setup"],
             ),
-            node(
-                func=train_evaluate_knn_master,
-                inputs=["master_dataset_knn_train", "master_dataset_knn_test"],
-                outputs="knn_master_results",
-                name="train_evaluate_knn_master_node",
-                tags=["model_training", "knn", "master"],
-            ),
+
             # --- Random Forest ---
             node(
                 func=train_evaluate_rf_crime,
-                inputs=["crime_dataset_tree_train", "crime_dataset_tree_test"],
+                inputs=["crime_dataset_features", "fold_boundaries"],
                 outputs="rf_crime_results",
                 name="train_evaluate_rf_crime_node",
                 tags=["model_training", "random_forest", "crime_only"],
             ),
             node(
                 func=train_evaluate_rf_master,
-                inputs=["master_dataset_tree_train", "master_dataset_tree_test"],
+                inputs=["master_dataset_features", "fold_boundaries"],
                 outputs="rf_master_results",
                 name="train_evaluate_rf_master_node",
                 tags=["model_training", "random_forest", "master"],
             ),
-            # --- Gradient Boosting ---
-            node(
-                func=train_evaluate_gbm_crime,
-                inputs=["crime_dataset_tree_train", "crime_dataset_tree_test"],
-                outputs="gbm_crime_results",
-                name="train_evaluate_gbm_crime_node",
-                tags=["model_training", "gradient_boosting", "crime_only"],
-            ),
-            node(
-                func=train_evaluate_gbm_master,
-                inputs=["master_dataset_tree_train", "master_dataset_tree_test"],
-                outputs="gbm_master_results",
-                name="train_evaluate_gbm_master_node",
-                tags=["model_training", "gradient_boosting", "master"],
-            ),
+
             # --- XGBoost ---
             node(
                 func=train_evaluate_xgb_crime,
-                inputs=["crime_dataset_tree_train", "crime_dataset_tree_test"],
+                inputs=["crime_dataset_features", "fold_boundaries"],
                 outputs="xgb_crime_results",
                 name="train_evaluate_xgb_crime_node",
                 tags=["model_training", "xgboost", "crime_only"],
             ),
             node(
                 func=train_evaluate_xgb_master,
-                inputs=["master_dataset_tree_train", "master_dataset_tree_test"],
+                inputs=["master_dataset_features", "fold_boundaries"],
                 outputs="xgb_master_results",
                 name="train_evaluate_xgb_master_node",
                 tags=["model_training", "xgboost", "master"],
             ),
-            # --- Consolidate ---
+
+            # --- LightGBM ---
+            node(
+                func=train_evaluate_lgbm_crime,
+                inputs=["crime_dataset_features", "fold_boundaries"],
+                outputs="lgbm_crime_results",
+                name="train_evaluate_lgbm_crime_node",
+                tags=["model_training", "lightgbm", "crime_only"],
+            ),
+            node(
+                func=train_evaluate_lgbm_master,
+                inputs=["master_dataset_features", "fold_boundaries"],
+                outputs="lgbm_master_results",
+                name="train_evaluate_lgbm_master_node",
+                tags=["model_training", "lightgbm", "master"],
+            ),
+
+            # --- CatBoost ---
+            node(
+                func=train_evaluate_catboost_crime,
+                inputs=["crime_dataset_features", "fold_boundaries"],
+                outputs="catboost_crime_results",
+                name="train_evaluate_catboost_crime_node",
+                tags=["model_training", "catboost", "crime_only"],
+            ),
+            node(
+                func=train_evaluate_catboost_master,
+                inputs=["master_dataset_features", "fold_boundaries"],
+                outputs="catboost_master_results",
+                name="train_evaluate_catboost_master_node",
+                tags=["model_training", "catboost", "master"],
+            ),
+
+            # --- Consolidate + report ---
             node(
                 func=consolidate_experiment_results,
                 inputs=[
-                    "knn_crime_results", "knn_master_results",
                     "rf_crime_results", "rf_master_results",
-                    "gbm_crime_results", "gbm_master_results",
                     "xgb_crime_results", "xgb_master_results",
+                    "lgbm_crime_results", "lgbm_master_results",
+                    "catboost_crime_results", "catboost_master_results",
                 ],
-                outputs="experiment_results",
+                outputs="experiment_results_per_fold",
                 name="consolidate_experiment_results_node",
+                tags=["model_training", "reporting"],
+            ),
+            node(
+                func=summarize_experiment_results,
+                inputs="experiment_results_per_fold",
+                outputs="experiment_results_summary",
+                name="summarize_experiment_results_node",
+                tags=["model_training", "reporting"],
+            ),
+            node(
+                func=run_paired_significance_tests,
+                inputs="experiment_results_per_fold",
+                outputs="experiment_significance_tests",
+                name="run_paired_significance_tests_node",
                 tags=["model_training", "reporting"],
             ),
         ]

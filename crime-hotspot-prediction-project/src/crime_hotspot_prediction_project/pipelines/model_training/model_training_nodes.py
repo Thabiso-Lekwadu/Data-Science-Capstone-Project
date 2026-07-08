@@ -1,243 +1,319 @@
-"""Model Training and Evaluation Nodes."""
+"""Model Training and Evaluation Nodes — regression, walk-forward CV.
+
+Reframed from classification (predicting Cluster) to regression (predicting
+Crime Count). Four tree-ensemble regressors are compared under two
+conditions -- crime_only (baseline) vs master (crime + socioeconomic,
+enriched) -- using expanding-window (walk-forward) time series
+cross-validation rather than a single train/test split.
+
+Fold boundaries are computed once, from the master (enriched) dataset's
+date range -- since it results from an inner-ish merge it typically spans
+fewer distinct periods than crime_processed -- and the *same* boundaries are
+reused for the crime_only condition. This is what makes the paired
+significance test in `run_paired_significance_tests` valid: both conditions
+are evaluated on identical validation windows.
+"""
 from __future__ import annotations
 
 import logging
 import pickle
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import (
-    accuracy_score, f1_score, precision_score, recall_score,
-    classification_report, roc_auc_score
-)
-from xgboost import XGBClassifier
+from scipy import stats
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from catboost import CatBoostRegressor
 
 logger = logging.getLogger(__name__)
 
-TARGET_COL = "Cluster"
+TARGET_COL = "Crime Count"
+DATE_COL = "date"
 MODELS_DIR = Path("data/06_models")
 
 
-def _save_model(model, name: str):
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+
+def _save_model(model, name: str) -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     path = MODELS_DIR / f"{name}.pkl"
     with open(path, "wb") as f:
         pickle.dump(model, f)
-    logger.info("Model saved → %s", path)
+    logger.info("Model saved -> %s", path)
 
 
-def _split_X_y(train: pd.DataFrame, test: pd.DataFrame) -> Tuple:
-    X_train = train.drop(columns=[TARGET_COL])
-    y_train = train[TARGET_COL]
-    X_test  = test.drop(columns=[TARGET_COL])
-    y_test  = test[TARGET_COL]
-    logger.info("Features | train: %s | test: %s | classes: %d",
-                X_train.shape, X_test.shape, y_train.nunique())
-    return X_train, y_train, X_test, y_test
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+def _smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Symmetric MAPE. Preferred over plain MAPE here because Crime Count
+    can legitimately be 0 for a given (Cluster, Type of Crime, period),
+    which makes plain MAPE's division blow up."""
+    denom = np.abs(y_true) + np.abs(y_pred)
+    diff = np.abs(y_true - y_pred)
+    mask = denom != 0
+    if not mask.any():
+        return 0.0
+    return float(np.mean(2.0 * diff[mask] / denom[mask]) * 100)
 
 
-def _check_label_inversion(y_test: pd.Series, y_pred: np.ndarray,
-                            model_name: str, condition: str) -> np.ndarray:
+def _regression_metrics(y_true: pd.Series, y_pred: np.ndarray) -> dict:
+    return {
+        "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "r2": float(r2_score(y_true, y_pred)),
+        "smape": _smape(y_true.to_numpy(), y_pred),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward CV
+# ---------------------------------------------------------------------------
+
+def compute_fold_boundaries(master_dataset_features: pd.DataFrame, n_splits: int) -> pd.DataFrame:
+    """Compute shared expanding-window fold boundaries from the master
+    (enriched) dataset's date range. Both conditions are evaluated on these
+    same boundaries so per-model results are paired and comparable.
     """
-    Detect and correct label inversion caused by LabelEncoder class ordering.
+    dates = pd.to_datetime(master_dataset_features[DATE_COL])
+    unique_dates = np.sort(dates.unique())
 
-    When the encoder maps classes differently between crime-only and master
-    conditions, a model may produce systematically inverted predictions
-    (AUC < 0.5). This is equivalent to the model being correct but evaluated
-    against the wrong class — flipping predictions recovers the true signal.
-
-    Detection: compute accuracy. If accuracy < 1/n_classes (worse than random),
-    invert by mapping each predicted label to: (n_classes - 1 - label).
-    This is only applied when the improvement is statistically meaningful.
-    """
-    n_classes = len(np.unique(y_test))
-    if n_classes < 2:
-        return y_pred
-
-    acc = accuracy_score(y_test, y_pred)
-    chance = 1.0 / n_classes
-
-    if acc < chance * 0.8:  # meaningfully below chance — inversion likely
-        y_pred_flipped = (n_classes - 1 - y_pred)
-        acc_flipped = accuracy_score(y_test, y_pred_flipped)
-        logger.warning(
-            "%s [%s] | Possible label inversion detected. "
-            "Original acc: %.4f | Flipped acc: %.4f | chance: %.4f",
-            model_name, condition, acc, acc_flipped, chance
+    if len(unique_dates) < n_splits + 1:
+        raise ValueError(
+            f"Only {len(unique_dates)} distinct periods available -- not enough "
+            f"for {n_splits} walk-forward folds. Reduce n_splits in parameters.yml."
         )
-        if acc_flipped > acc:
-            logger.warning(
-                "%s [%s] | Applying label inversion correction. "
-                "This indicates the LabelEncoder mapped classes differently "
-                "between conditions. Retrain with a consistent encoder to resolve.",
-                model_name, condition
-            )
-            return y_pred_flipped
 
-    return y_pred
-
-
-def _evaluate(model_name: str, condition: str,
-              y_test: pd.Series, y_pred: np.ndarray) -> pd.DataFrame:
-    # Check and correct label inversion before computing metrics
-    y_pred = _check_label_inversion(y_test, y_pred, model_name, condition)
-
-    metrics = pd.DataFrame([{
-        "model":           model_name,
-        "condition":       condition,
-        "accuracy":        round(accuracy_score(y_test, y_pred), 4),
-        "f1_macro":        round(f1_score(y_test, y_pred, average="macro",    zero_division=0), 4),
-        "f1_weighted":     round(f1_score(y_test, y_pred, average="weighted", zero_division=0), 4),
-        "precision_macro": round(precision_score(y_test, y_pred, average="macro",    zero_division=0), 4),
-        "recall_macro":    round(recall_score(y_test, y_pred,    average="macro",    zero_division=0), 4),
-    }])
-    logger.info("%s [%s] | acc: %.4f | f1_macro: %.4f | f1_weighted: %.4f",
-                model_name, condition,
-                metrics["accuracy"].iloc[0],
-                metrics["f1_macro"].iloc[0],
-                metrics["f1_weighted"].iloc[0])
-    logger.info("%s [%s] classification report:\n%s",
-                model_name, condition,
-                classification_report(y_test, y_pred, zero_division=0))
-    return metrics
+    period_chunks = np.array_split(unique_dates, n_splits + 1)
+    rows = []
+    for fold_idx, chunk in enumerate(period_chunks[1:], start=1):
+        rows.append({
+            "fold": fold_idx,
+            "val_start": chunk[0],
+            "val_end": chunk[-1],
+        })
+    boundaries = pd.DataFrame(rows)
+    logger.info("Computed %d walk-forward fold boundaries:\n%s", len(boundaries), boundaries.to_string(index=False))
+    return boundaries
 
 
-# ---------------------------------------------------------------------------
-# KNN
-# ---------------------------------------------------------------------------
+def _split_X_y(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+    X = df.drop(columns=[TARGET_COL, DATE_COL])
+    y = df[TARGET_COL]
+    return X, y
 
-def train_evaluate_knn_crime(
-    crime_dataset_knn_train: pd.DataFrame,
-    crime_dataset_knn_test: pd.DataFrame,
+
+def _run_walk_forward_cv(
+    df: pd.DataFrame,
+    fold_boundaries: pd.DataFrame,
+    model_builder: Callable,
+    model_name: str,
+    condition: str,
 ) -> pd.DataFrame:
-    logger.info("--- train_evaluate_knn_crime ---")
-    X_train, y_train, X_test, y_test = _split_X_y(crime_dataset_knn_train, crime_dataset_knn_test)
-    model = KNeighborsClassifier(n_neighbors=5, metric="euclidean", n_jobs=-1)
-    model.fit(X_train, y_train)
-    _save_model(model, "knn_crime")
-    return _evaluate("KNN", "crime_only", y_test, model.predict(X_test))
+    df = df.copy()
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL])
+    df = df.sort_values(DATE_COL).reset_index(drop=True)
 
+    fold_metrics = []
+    for _, row in fold_boundaries.iterrows():
+        fold_idx, val_start, val_end = row["fold"], row["val_start"], row["val_end"]
 
-def train_evaluate_knn_master(
-    master_dataset_knn_train: pd.DataFrame,
-    master_dataset_knn_test: pd.DataFrame,
-) -> pd.DataFrame:
-    logger.info("--- train_evaluate_knn_master ---")
-    X_train, y_train, X_test, y_test = _split_X_y(master_dataset_knn_train, master_dataset_knn_test)
-    model = KNeighborsClassifier(n_neighbors=5, metric="euclidean", n_jobs=-1)
-    model.fit(X_train, y_train)
-    _save_model(model, "knn_master")
-    return _evaluate("KNN", "master", y_test, model.predict(X_test))
+        train_df = df[df[DATE_COL] < val_start]
+        val_df = df[(df[DATE_COL] >= val_start) & (df[DATE_COL] <= val_end)]
+
+        if train_df.empty or val_df.empty:
+            logger.warning("%s [%s] fold %d skipped -- empty train or val window", model_name, condition, fold_idx)
+            continue
+
+        X_train, y_train = _split_X_y(train_df)
+        X_val, y_val = _split_X_y(val_df)
+
+        model = model_builder()
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_val)
+
+        metrics = _regression_metrics(y_val, y_pred)
+        metrics.update({
+            "model": model_name,
+            "condition": condition,
+            "fold": int(fold_idx),
+            "train_rows": len(train_df),
+            "val_rows": len(val_df),
+            "val_start": val_start,
+            "val_end": val_end,
+        })
+        fold_metrics.append(metrics)
+        logger.info(
+            "%s [%s] fold %d | val %s -> %s | rmse: %.3f | mae: %.3f | r2: %.3f | smape: %.2f%%",
+            model_name, condition, fold_idx, val_start, val_end,
+            metrics["rmse"], metrics["mae"], metrics["r2"], metrics["smape"],
+        )
+
+    fold_df = pd.DataFrame(fold_metrics)
+
+    # Refit on the full dataset for a deployable model artifact.
+    X_full, y_full = _split_X_y(df)
+    final_model = model_builder()
+    final_model.fit(X_full, y_full)
+    _save_model(final_model, f"{model_name.lower()}_{condition}")
+
+    return fold_df
 
 
 # ---------------------------------------------------------------------------
-# Random Forest
+# Model builders
 # ---------------------------------------------------------------------------
 
-def train_evaluate_rf_crime(
-    crime_dataset_tree_train: pd.DataFrame,
-    crime_dataset_tree_test: pd.DataFrame,
-) -> pd.DataFrame:
+def _rf_builder() -> RandomForestRegressor:
+    return RandomForestRegressor(n_estimators=300, max_depth=None, random_state=42, n_jobs=-1)
+
+
+def _xgb_builder() -> XGBRegressor:
+    return XGBRegressor(
+        n_estimators=300, learning_rate=0.05, max_depth=6,
+        random_state=42, n_jobs=-1, verbosity=0,
+    )
+
+
+def _lgbm_builder() -> LGBMRegressor:
+    return LGBMRegressor(
+        n_estimators=300, learning_rate=0.05, max_depth=-1,
+        random_state=42, n_jobs=-1, verbosity=-1,
+    )
+
+
+def _catboost_builder() -> CatBoostRegressor:
+    return CatBoostRegressor(
+        iterations=300, learning_rate=0.05, depth=6,
+        random_state=42, verbose=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public nodes -- Random Forest
+# ---------------------------------------------------------------------------
+
+def train_evaluate_rf_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
     logger.info("--- train_evaluate_rf_crime ---")
-    X_train, y_train, X_test, y_test = _split_X_y(crime_dataset_tree_train, crime_dataset_tree_test)
-    model = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
-    model.fit(X_train, y_train)
-    _save_model(model, "random_forest_crime")
-    return _evaluate("RandomForest", "crime_only", y_test, model.predict(X_test))
+    return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _rf_builder, "RandomForest", "crime_only")
 
 
-def train_evaluate_rf_master(
-    master_dataset_tree_train: pd.DataFrame,
-    master_dataset_tree_test: pd.DataFrame,
-) -> pd.DataFrame:
+def train_evaluate_rf_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
     logger.info("--- train_evaluate_rf_master ---")
-    X_train, y_train, X_test, y_test = _split_X_y(master_dataset_tree_train, master_dataset_tree_test)
-    model = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
-    model.fit(X_train, y_train)
-    _save_model(model, "random_forest_master")
-    return _evaluate("RandomForest", "master", y_test, model.predict(X_test))
+    return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _rf_builder, "RandomForest", "master")
 
 
 # ---------------------------------------------------------------------------
-# Gradient Boosting
+# Public nodes -- XGBoost
 # ---------------------------------------------------------------------------
 
-def train_evaluate_gbm_crime(
-    crime_dataset_tree_train: pd.DataFrame,
-    crime_dataset_tree_test: pd.DataFrame,
-) -> pd.DataFrame:
-    logger.info("--- train_evaluate_gbm_crime ---")
-    X_train, y_train, X_test, y_test = _split_X_y(crime_dataset_tree_train, crime_dataset_tree_test)
-    model = GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, random_state=42)
-    model.fit(X_train, y_train)
-    _save_model(model, "gradient_boosting_crime")
-    return _evaluate("GradientBoosting", "crime_only", y_test, model.predict(X_test))
-
-
-def train_evaluate_gbm_master(
-    master_dataset_tree_train: pd.DataFrame,
-    master_dataset_tree_test: pd.DataFrame,
-) -> pd.DataFrame:
-    logger.info("--- train_evaluate_gbm_master ---")
-    X_train, y_train, X_test, y_test = _split_X_y(master_dataset_tree_train, master_dataset_tree_test)
-    model = GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, random_state=42)
-    model.fit(X_train, y_train)
-    _save_model(model, "gradient_boosting_master")
-    return _evaluate("GradientBoosting", "master", y_test, model.predict(X_test))
-
-
-# ---------------------------------------------------------------------------
-# XGBoost
-# ---------------------------------------------------------------------------
-
-def train_evaluate_xgb_crime(
-    crime_dataset_tree_train: pd.DataFrame,
-    crime_dataset_tree_test: pd.DataFrame,
-) -> pd.DataFrame:
+def train_evaluate_xgb_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
     logger.info("--- train_evaluate_xgb_crime ---")
-    X_train, y_train, X_test, y_test = _split_X_y(crime_dataset_tree_train, crime_dataset_tree_test)
-    model = XGBClassifier(n_estimators=200, learning_rate=0.1, random_state=42,
-                          eval_metric="mlogloss", verbosity=0)
-    model.fit(X_train, y_train)
-    _save_model(model, "xgboost_crime")
-    return _evaluate("XGBoost", "crime_only", y_test, model.predict(X_test))
+    return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _xgb_builder, "XGBoost", "crime_only")
 
 
-def train_evaluate_xgb_master(
-    master_dataset_tree_train: pd.DataFrame,
-    master_dataset_tree_test: pd.DataFrame,
-) -> pd.DataFrame:
+def train_evaluate_xgb_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
     logger.info("--- train_evaluate_xgb_master ---")
-    X_train, y_train, X_test, y_test = _split_X_y(master_dataset_tree_train, master_dataset_tree_test)
-    model = XGBClassifier(n_estimators=200, learning_rate=0.1, random_state=42,
-                          eval_metric="mlogloss", verbosity=0)
-    model.fit(X_train, y_train)
-    _save_model(model, "xgboost_master")
-    return _evaluate("XGBoost", "master", y_test, model.predict(X_test))
+    return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _xgb_builder, "XGBoost", "master")
 
 
 # ---------------------------------------------------------------------------
-# Consolidate
+# Public nodes -- LightGBM
+# ---------------------------------------------------------------------------
+
+def train_evaluate_lgbm_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+    logger.info("--- train_evaluate_lgbm_crime ---")
+    return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _lgbm_builder, "LightGBM", "crime_only")
+
+
+def train_evaluate_lgbm_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+    logger.info("--- train_evaluate_lgbm_master ---")
+    return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _lgbm_builder, "LightGBM", "master")
+
+
+# ---------------------------------------------------------------------------
+# Public nodes -- CatBoost
+# ---------------------------------------------------------------------------
+
+def train_evaluate_catboost_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+    logger.info("--- train_evaluate_catboost_crime ---")
+    return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _catboost_builder, "CatBoost", "crime_only")
+
+
+def train_evaluate_catboost_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+    logger.info("--- train_evaluate_catboost_master ---")
+    return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _catboost_builder, "CatBoost", "master")
+
+
+# ---------------------------------------------------------------------------
+# Consolidate + significance testing
 # ---------------------------------------------------------------------------
 
 def consolidate_experiment_results(
-    knn_crime: pd.DataFrame,
-    knn_master: pd.DataFrame,
-    rf_crime: pd.DataFrame,
-    rf_master: pd.DataFrame,
-    gbm_crime: pd.DataFrame,
-    gbm_master: pd.DataFrame,
-    xgb_crime: pd.DataFrame,
-    xgb_master: pd.DataFrame,
+    rf_crime: pd.DataFrame, rf_master: pd.DataFrame,
+    xgb_crime: pd.DataFrame, xgb_master: pd.DataFrame,
+    lgbm_crime: pd.DataFrame, lgbm_master: pd.DataFrame,
+    catboost_crime: pd.DataFrame, catboost_master: pd.DataFrame,
 ) -> pd.DataFrame:
-    results = pd.concat(
-        [knn_crime, knn_master, rf_crime, rf_master,
-         gbm_crime, gbm_master, xgb_crime, xgb_master],
+    """Concatenate every model/condition's per-fold results into one table."""
+    all_folds = pd.concat(
+        [rf_crime, rf_master, xgb_crime, xgb_master,
+         lgbm_crime, lgbm_master, catboost_crime, catboost_master],
         ignore_index=True,
-    ).sort_values("f1_weighted", ascending=False).reset_index(drop=True)
-    logger.info("=== Experiment Results ===\n%s", results.to_string(index=False))
-    return results
+    )
+    logger.info("=== Per-fold results (%d rows) ===\n%s", len(all_folds), all_folds.to_string(index=False))
+    return all_folds
+
+
+def summarize_experiment_results(experiment_results_per_fold: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate per-fold metrics into mean +/- std per model/condition."""
+    summary = (
+        experiment_results_per_fold
+        .groupby(["model", "condition"])[["rmse", "mae", "r2", "smape"]]
+        .agg(["mean", "std"])
+    )
+    summary.columns = ["_".join(c) for c in summary.columns]
+    summary = summary.reset_index().sort_values("rmse_mean").reset_index(drop=True)
+    logger.info("=== Experiment summary (mean +/- std across folds) ===\n%s", summary.to_string(index=False))
+    return summary
+
+
+def run_paired_significance_tests(experiment_results_per_fold: pd.DataFrame) -> pd.DataFrame:
+    """Paired t-test per model: does the master (enriched) condition give a
+    significantly lower RMSE than crime_only across the same folds?
+
+    This directly supports (or refutes) the paper's central hypothesis that
+    socioeconomic enrichment yields statistically significant improvement.
+    """
+    rows = []
+    for model_name, grp in experiment_results_per_fold.groupby("model"):
+        pivot = grp.pivot(index="fold", columns="condition", values="rmse").dropna()
+        if len(pivot) < 2 or "crime_only" not in pivot.columns or "master" not in pivot.columns:
+            logger.warning("%s: not enough paired folds for a significance test -- skipped", model_name)
+            continue
+
+        t_stat, p_value = stats.ttest_rel(pivot["crime_only"], pivot["master"])
+        mean_crime_only = pivot["crime_only"].mean()
+        mean_master = pivot["master"].mean()
+
+        rows.append({
+            "model": model_name,
+            "n_folds": len(pivot),
+            "mean_rmse_crime_only": mean_crime_only,
+            "mean_rmse_master": mean_master,
+            "rmse_improvement": mean_crime_only - mean_master,
+            "t_stat": float(t_stat),
+            "p_value": float(p_value),
+            "significant_improvement_at_0.05": bool(p_value < 0.05 and mean_master < mean_crime_only),
+        })
+
+    result = pd.DataFrame(rows).sort_values("p_value").reset_index(drop=True)
+    logger.info("=== Paired significance tests (crime_only vs master, by RMSE) ===\n%s", result.to_string(index=False))
+    return result

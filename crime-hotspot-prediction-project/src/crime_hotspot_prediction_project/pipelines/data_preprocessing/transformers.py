@@ -161,7 +161,22 @@ class date_filter(BaseEstimator, TransformerMixin):
 
 
 class socio_merger(BaseEstimator, TransformerMixin):
-    """Merge a list of DataFrames on date and Cluster."""
+    """Merge a list of DataFrames on date and Cluster.
+
+    Every dataframe merged in (the `df` on the right of each join) is
+    expected to contribute exactly one row per (date, Cluster) -- that is
+    the whole point of a socioeconomic indicator: one value per
+    cluster-period. If some upstream dataset instead has multiple rows per
+    (date, Cluster) -- e.g. several unaggregated categories, like the 6
+    separate pop_edu_N sources -- a plain merge silently turns into a
+    many-to-many join and the row count explodes multiplicatively at every
+    step (this has bitten this pipeline before).
+
+    validate="many_to_one" turns that silent explosion into an immediate,
+    specific pandas MergeError naming the duplicate keys, so the broken
+    input is obvious instead of surfacing 10+ steps later as an
+    "ExcelDataset sheet too large" error.
+    """
     def fit(self, X, y=None):
         return self
 
@@ -170,8 +185,24 @@ class socio_merger(BaseEstimator, TransformerMixin):
             raise ValueError("Input must be a list of DataFrames.")
 
         result = X[0]
-        for df in X[1:]:
-            result = pd.merge(result, df, on=["date", "Cluster"], how="outer")
+        for i, df in enumerate(X[1:], start=1):
+            try:
+                result = pd.merge(
+                    result, df, on=["date", "Cluster"], how="outer", validate="many_to_one"
+                )
+            except pd.errors.MergeError as e:
+                dupes = df[df.duplicated(subset=["date", "Cluster"], keep=False)]
+                dupes = dupes.sort_values(["date", "Cluster"])
+                n_pairs = dupes[["date", "Cluster"]].drop_duplicates().shape[0]
+                raise ValueError(
+                    f"socio_merger: input at position {i} has duplicate (date, Cluster) "
+                    f"keys -- merging it would silently multiply row counts. "
+                    f"{len(dupes)} rows involved across {n_pairs} duplicated (date, Cluster) "
+                    f"pairs. This dataset needs to be aggregated "
+                    f"(e.g. groupby(['date', 'Cluster']).sum()/.mean()) to one row per "
+                    f"cluster-period before merging. Sample duplicates:\n"
+                    f"{dupes.head(10).to_string(index=False)}"
+                ) from e
 
         result.sort_values(by=["date", "Cluster"], inplace=True)
         result.dropna(inplace=True)

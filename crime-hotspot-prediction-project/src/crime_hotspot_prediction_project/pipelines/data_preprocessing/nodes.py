@@ -32,6 +32,8 @@ def preprocess_population_density(population_density: pd.DataFrame) -> pd.DataFr
     df = socio_data_cleaning().fit_transform(df)
     df = date_filter(start_year=2008).fit_transform(df)
     df = df.rename(columns={"value": "population_density"})
+
+    df = df.groupby(["date", "Cluster"], as_index=False)["population_density"].sum()
     return df
 
 
@@ -43,6 +45,8 @@ def preprocess_poor_households(poor_households: pd.DataFrame) -> pd.DataFrame:
     df = socio_data_cleaning().fit_transform(df)
     df = date_filter(start_year=2008).fit_transform(df)
     df = df.rename(columns={"value": "poor_households"})
+    # Collapse sub-series (e.g. income bands) into one total per cluster-period
+    df = df.groupby(["date", "Cluster"], as_index=False)["poor_households"].sum()
     return df
 
 
@@ -54,6 +58,8 @@ def preprocess_population_unemployment(population_unemployment: pd.DataFrame) ->
     df = socio_data_cleaning().fit_transform(df)
     df = date_filter(start_year=2008).fit_transform(df)
     df = df.rename(columns={"value": "population_unemployment"})
+
+    df = df.groupby(["date", "Cluster"], as_index=False)["population_unemployment"].sum()
     return df
 
 
@@ -76,6 +82,8 @@ def preprocess_pop_edu(
     df = socio_data_cleaning().fit_transform(df)
     df = date_filter(start_year=2008).fit_transform(df)
     df = df.rename(columns={"value": "population_education"})
+
+    df = df.groupby(["date", "Cluster"], as_index=False)["population_education"].sum()
     return df
 
 

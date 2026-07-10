@@ -1,65 +1,31 @@
-"""Page 1 — Exploratory Data Analysis (Research Questions)"""
+"""Page 1 — Exploratory Data Analysis.
+
+Four tools:
+  1. Univariate Explorer   — distribution of any single column, either dataset
+  2. Bivariate Explorer    — relationship between any two columns, either dataset
+  3. Time Series Explorer  — trends, year-on-year change, top regions
+  4. Enrichment Justification — the evidence behind "add socioeconomic features"
+"""
 from __future__ import annotations
-import hashlib
+
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
+import plotly.graph_objects as go
 import streamlit as st
 
-NUMERIC = ["Crime Count", "population_density", "poor_households",
-           "population_unemployment", "population_education"]
-
-
-def _dfhash(df: pd.DataFrame) -> str:
-    return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()[:12]
-
-
-@st.cache_data(show_spinner=False)
-def _agg_cluster_year(data_hash: str, df_json: str):
-    df = pd.read_json(df_json)
-    return df.groupby(["year", "Cluster"])["Crime Count"].sum().reset_index()
-
-@st.cache_data(show_spinner=False)
-def _agg_cluster_total(data_hash: str, df_json: str):
-    df = pd.read_json(df_json)
-    return (df.groupby(["Cluster", "year"])["Crime Count"].sum()
-              .groupby("Cluster").mean().reset_index()
-              .rename(columns={"Crime Count": "Mean Annual Crime Count"})
-              .sort_values("Mean Annual Crime Count", ascending=False))
-
-@st.cache_data(show_spinner=False)
-def _agg_yoy(data_hash: str, df_json: str):
-    df = pd.read_json(df_json)
-    yoy = (df.groupby(["year", "Cluster"])["Crime Count"].sum()
-             .groupby("Cluster").pct_change().mul(100).reset_index())
-    yoy.columns = ["year", "Cluster", "YoY %"]
-    return yoy.dropna()
-
-@st.cache_data(show_spinner=False)
-def _agg_hotspot_flags(data_hash: str, df_json: str):
-    df = pd.read_json(df_json)
-    yr_agg = df.groupby(["year", "Cluster"])["Crime Count"].sum().reset_index()
-    q75 = yr_agg.groupby("year")["Crime Count"].quantile(0.75).rename("q75")
-    yr_agg = yr_agg.merge(q75, on="year")
-    yr_agg["Hotspot"] = (yr_agg["Crime Count"] >= yr_agg["q75"]).astype(int)
-    return yr_agg
-
-@st.cache_data(show_spinner=False)
-def _agg_corr(data_hash: str, df_json: str, cols_key: str):
-    df = pd.read_json(df_json)
-    cols = cols_key.split("|")
-    available = [c for c in cols if c in df.columns]
-    return df[available].corr().round(3)
-
 READABLE = {
-    "Crime Count":              "Crime Count",
-    "population_density":       "Population Density",
-    "poor_households":          "Poor Households",
-    "population_unemployment":  "Population Unemployment",
-    "population_education":     "Population Education",
+    "Crime Count":             "Crime Count",
+    "population_density":      "Population Density",
+    "poor_households":         "Poor Households",
+    "population_unemployment": "Population Unemployment",
+    "population_education":    "Population Education",
+    "Cluster":                 "Cluster",
+    "Type of Crime":           "Type of Crime",
+    "year":                    "Year",
 }
+SOCIO = ["population_density", "poor_households",
+         "population_unemployment", "population_education"]
 
 
 def _upd(fig, base, **kw):
@@ -67,546 +33,342 @@ def _upd(fig, base, **kw):
     return fig
 
 
-# ── chart builders ──────────────────────────────────────────────────────────
-
-def _bar(df, x, y, color_col, palette, base, title, orient="v", **kw):
-    if orient == "h":
-        fig = px.bar(df, x=y, y=x, orientation="h", color=color_col,
-                     color_discrete_sequence=palette, title=title)
-    else:
-        fig = px.bar(df, x=x, y=y, color=color_col,
-                     color_discrete_sequence=palette, title=title)
-    return _upd(fig, base, **kw)
+def _label(c):
+    return READABLE.get(c, c)
 
 
-def _line(df, x, y, color, palette, base, title, **kw):
-    fig = px.line(df, x=x, y=y, color=color, color_discrete_sequence=palette,
-                  markers=True, title=title)
-    fig.update_traces(line_width=2, marker_size=6)
-    return _upd(fig, base, **kw)
+def _numeric_cols(df):
+    return [c for c in df.select_dtypes(include=[np.number]).columns if c not in ("year",)] + \
+           (["year"] if "year" in df.columns else [])
 
 
-def _area(df, x, y, color, palette, base, title, **kw):
-    fig = px.area(df, x=x, y=y, color=color,
-                  color_discrete_sequence=palette, title=title)
-    return _upd(fig, base, **kw)
+def _categorical_cols(df):
+    return [c for c in ["Cluster", "Type of Crime"] if c in df.columns]
 
 
-def _scatter(df, x, y, color, size, palette, base, title, **kw):
-    fig = px.scatter(df, x=x, y=y, color=color, size=size, size_max=18,
-                     color_discrete_sequence=palette,
-                     trendline="ols", title=title)
-    fig.update_traces(marker_opacity=0.7)
-    return _upd(fig, base, **kw)
-
-
-def _box(df, x, y, color, palette, base, title, **kw):
-    fig = px.box(df, x=x, y=y, color=color,
-                 color_discrete_sequence=palette, title=title)
-    fig.update_layout(showlegend=False)
-    return _upd(fig, base, xaxis_tickangle=-30, **kw)
-
-
-def _strip(df, x, y, color, palette, base, title, **kw):
-    fig = px.strip(df, x=x, y=y, color=color,
-                   color_discrete_sequence=palette, title=title)
-    return _upd(fig, base, xaxis_tickangle=-30, **kw)
-
-
-def _heatmap_pivot(pivot, base, title, cs="YlOrBr"):
-    fig = px.imshow(pivot, aspect="auto", color_continuous_scale=cs, title=title)
-    fig.update_coloraxes(colorbar_tickfont_color="#566174")
-    return _upd(fig, base)
-
-
-def _histogram(df, col, color_col, palette, base, title, nbins=50, **kw):
-    fig = px.histogram(df, x=col, nbins=nbins, color=color_col,
-                       color_discrete_sequence=palette, barmode="overlay",
-                       title=title)
-    fig.update_traces(opacity=0.75)
-    return _upd(fig, base, **kw)
-
-
-def _render_chart(chart_type, rq_df, x, y, color, size_col, palette, base, title):
-    """Dispatch to the chosen chart type."""
-    ct = chart_type
-    if ct == "Bar Chart":
-        return _bar(rq_df, x, y, color, palette, base, title, orient="v")
-    if ct == "Horizontal Bar":
-        return _bar(rq_df, x, y, color, palette, base, title, orient="h")
-    if ct == "Line Chart":
-        return _line(rq_df, x, y, color, palette, base, title)
-    if ct == "Area Chart":
-        return _area(rq_df, x, y, color, palette, base, title)
-    if ct == "Scatter Plot":
-        return _scatter(rq_df, x, y, color, size_col, palette, base, title)
-    if ct == "Box Plot":
-        return _box(rq_df, x, y, color, palette, base, title)
-    if ct == "Strip Plot":
-        return _strip(rq_df, x, y, color, palette, base, title)
-    if ct == "Histogram":
-        return _histogram(rq_df, y, color, palette, base, title)
-    # fallback
-    return _bar(rq_df, x, y, color, palette, base, title)
-
-
-# ── main render ─────────────────────────────────────────────────────────────
-
-def render(df: pd.DataFrame, crime_only_df, PALETTE: list, PLOT_BASE: dict):
-    st.markdown('<div class="section-label">Module 01</div>', unsafe_allow_html=True)
-    st.markdown("# Exploratory Data Analysis")
-    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
+def _prep(df):
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"])
     if "year" not in df.columns:
         df["year"] = df["date"].dt.year
+    return df
 
-    dh = _dfhash(df)
 
-    # KPIs
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Records",          f"{len(df):,}")
-    k2.metric("Clusters",         df["Cluster"].nunique())
-    k3.metric("Crime Categories", df["Type of Crime"].nunique())
-    k4.metric("Year Range",       f"{df['year'].min()}–{df['year'].max()}")
-    k5.metric("Avg Crime Count",  f"{df['Crime Count'].mean():,.0f}")
-    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+# ── Univariate ──────────────────────────────────────────────────────────────
 
-    # Global filters
-    fc1, fc2, fc3 = st.columns([2, 2, 1])
-    clusters = fc1.multiselect("Filter — Cluster",
-        sorted(df["Cluster"].unique()), default=list(df["Cluster"].unique()))
-    crime_types = fc2.multiselect("Filter — Crime Type",
-        sorted(df["Type of Crime"].unique()), default=list(df["Type of Crime"].unique()))
-    yr = fc3.slider("Year Range",
-        int(df["year"].min()), int(df["year"].max()),
-        (int(df["year"].min()), int(df["year"].max())))
+def _univariate(df, PALETTE, PLOT_BASE):
+    st.markdown("## Univariate Explorer")
+    st.markdown('<p style="font-size:0.83rem;color:#566174;">Look at the shape of one variable '
+                'at a time — its spread, skew, and outliers.</p>', unsafe_allow_html=True)
 
-    fdf = df[
-        df["Cluster"].isin(clusters or df["Cluster"].unique()) &
-        df["Type of Crime"].isin(crime_types or df["Type of Crime"].unique()) &
-        df["year"].between(*yr)
-    ].copy()
+    num_cols = _numeric_cols(df)
+    cat_cols = _categorical_cols(df)
+    all_cols = num_cols + cat_cols
 
-    if fdf.empty:
-        st.warning("No records match current filters.")
+    c1, c2 = st.columns(2)
+    col = c1.selectbox("Column", all_cols, format_func=_label, key="uni_col")
+    is_numeric = col in num_cols
+
+    if is_numeric:
+        chart = c2.selectbox("Chart Type", ["Histogram", "Box Plot", "Violin-style (Box + Points)"], key="uni_chart")
+        if chart == "Histogram":
+            nbins = st.slider("Bins", 10, 100, 40, key="uni_bins")
+            fig = px.histogram(df, x=col, nbins=nbins, color_discrete_sequence=PALETTE,
+                                title=f"Distribution of {_label(col)}")
+        elif chart == "Box Plot":
+            fig = px.box(df, y=col, color_discrete_sequence=PALETTE,
+                         title=f"Box Plot — {_label(col)}")
+        else:
+            fig = px.strip(df, y=col, color_discrete_sequence=PALETTE,
+                           title=f"Point Spread — {_label(col)}")
+            fig.add_trace(go.Box(y=df[col], name="", marker_color=PALETTE[0],
+                                  boxpoints=False, fillcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(_upd(fig, PLOT_BASE), use_container_width=True)
+
+        st.markdown('<div class="section-label">Summary Statistics</div>', unsafe_allow_html=True)
+        desc = df[col].describe().to_frame().T
+        desc.index = [_label(col)]
+        st.dataframe(desc, use_container_width=True)
+    else:
+        chart = c2.selectbox("Chart Type", ["Bar Chart", "Horizontal Bar"], key="uni_chart_cat")
+        counts = df[col].value_counts().reset_index()
+        counts.columns = [col, "Count"]
+        if chart == "Bar Chart":
+            fig = px.bar(counts, x=col, y="Count", color_discrete_sequence=PALETTE,
+                         title=f"Frequency of {_label(col)}")
+            fig.update_layout(xaxis_tickangle=-30)
+        else:
+            fig = px.bar(counts.sort_values("Count"), x="Count", y=col, orientation="h",
+                         color_discrete_sequence=PALETTE, title=f"Frequency of {_label(col)}")
+        st.plotly_chart(_upd(fig, PLOT_BASE), use_container_width=True)
+        st.dataframe(counts, use_container_width=True)
+
+
+# ── Bivariate ───────────────────────────────────────────────────────────────
+
+def _bivariate(df, PALETTE, PLOT_BASE):
+    st.markdown("## Bivariate Explorer")
+    st.markdown('<p style="font-size:0.83rem;color:#566174;">Pick any two variables to check '
+                'for a relationship — this is how we justified pulling in socioeconomic data.</p>',
+                unsafe_allow_html=True)
+
+    num_cols = _numeric_cols(df)
+    cat_cols = _categorical_cols(df)
+    all_cols = num_cols + cat_cols
+
+    c1, c2, c3, c4 = st.columns(4)
+    x_col = c1.selectbox("X", all_cols, index=0, format_func=_label, key="bi_x")
+    y_col = c2.selectbox("Y", all_cols, index=min(1, len(all_cols) - 1), format_func=_label, key="bi_y")
+    color_col = c3.selectbox("Colour By", ["None"] + cat_cols, key="bi_color")
+    color_col = None if color_col == "None" else color_col
+    chart = c4.selectbox("Chart Type",
+        ["Scatter Plot", "Line Chart", "Box Plot", "Bar Chart (mean)", "Correlation Heatmap"],
+        key="bi_chart")
+
+    if chart == "Correlation Heatmap":
+        cols = [c for c in num_cols if c != "year"]
+        corr = df[cols].corr().round(3)
+        corr.index = [_label(c) for c in corr.index]
+        corr.columns = [_label(c) for c in corr.columns]
+        fig = px.imshow(corr, text_auto=True, aspect="auto", color_continuous_scale="RdBu_r",
+                        zmin=-1, zmax=1, title="Pearson Correlation Matrix")
+        st.plotly_chart(_upd(fig, PLOT_BASE), use_container_width=True)
         return
 
-    tabs = st.tabs([
-        "Univariate Analysis",
-        "Top Crime Locations",
-        "Crime Patterns",
-        "Seasonal Trends",
-        "Hotspot Persistence",
-        "Crime Predictors",
-    ])
+    sample = df.sample(min(len(df), 2000), random_state=42) if chart in ("Scatter Plot",) else df
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 0 — UNIVARIATE ANALYSIS
-    # ══════════════════════════════════════════════════════════════════════════
-    with tabs[0]:
-        st.markdown("## Univariate Analysis")
-        st.markdown(
-            '<p style="font-size:0.83rem;color:#566174;">Explore the distribution of each feature '
-            'individually. Choose a feature and chart type to understand its spread, central tendency, '
-            'and outliers.</p>',
-            unsafe_allow_html=True)
+    if chart == "Scatter Plot":
+        fig = px.scatter(sample, x=x_col, y=y_col, color=color_col,
+                         color_discrete_sequence=PALETTE, trendline="ols",
+                         title=f"{_label(x_col)} vs {_label(y_col)}")
+        fig.update_traces(marker_opacity=0.65)
+    elif chart == "Line Chart":
+        agg = df.groupby([x_col] + ([color_col] if color_col else []))[y_col].mean().reset_index()
+        fig = px.line(agg, x=x_col, y=y_col, color=color_col, markers=True,
+                     color_discrete_sequence=PALETTE, title=f"{_label(y_col)} by {_label(x_col)}")
+    elif chart == "Box Plot":
+        fig = px.box(df, x=x_col, y=y_col, color=color_col,
+                    color_discrete_sequence=PALETTE, title=f"{_label(y_col)} by {_label(x_col)}")
+        fig.update_layout(xaxis_tickangle=-30)
+    else:  # Bar Chart (mean)
+        agg = df.groupby([x_col] + ([color_col] if color_col else []))[y_col].mean().reset_index()
+        fig = px.bar(agg, x=x_col, y=y_col, color=color_col, barmode="group",
+                    color_discrete_sequence=PALETTE, title=f"Mean {_label(y_col)} by {_label(x_col)}")
+        fig.update_layout(xaxis_tickangle=-30)
 
-        u1, u2 = st.columns([2, 1])
-        uni_col   = u1.selectbox("Feature to Analyse", NUMERIC, key="uni_col")
-        uni_chart = u2.selectbox("Chart Type",
-            ["Histogram", "Box Plot", "Bar Chart (Mean by Cluster)",
-             "Bar Chart (Total by Cluster)", "Bar Chart (Mean by Crime Type)"],
-            key="uni_chart")
+    st.plotly_chart(_upd(fig, PLOT_BASE), use_container_width=True)
 
-        if uni_chart == "Histogram":
-            n_bins = st.slider("Number of bins", 10, 100, 40, key="uni_bins")
-            fig_uni = go.Figure(go.Histogram(
-                x=fdf[uni_col].dropna(), nbinsx=n_bins,
-                marker_color="#e9c46a", opacity=0.8,
-                marker_line_color="#070b14", marker_line_width=0.5,
-            ))
-            fig_uni.update_layout(**PLOT_BASE, title=f"Histogram — {uni_col}",
-                                  bargap=0.02, showlegend=False,
-                                  xaxis_title=uni_col, yaxis_title="Count")
-            st.plotly_chart(fig_uni, use_container_width=True)
+    if x_col in num_cols and y_col in num_cols:
+        r = df[[x_col, y_col]].corr().iloc[0, 1]
+        st.markdown(f'<div class="stat-card">Pearson correlation between '
+                    f'<b>{_label(x_col)}</b> and <b>{_label(y_col)}</b>: '
+                    f'<span style="font-family:\'DM Mono\',monospace;color:#e9c46a;">{r:.3f}</span></div>',
+                    unsafe_allow_html=True)
 
-            # Summary stats alongside
-            st.markdown('<div class="section-label">Distribution Summary</div>', unsafe_allow_html=True)
-            s = fdf[uni_col].describe()
-            sc1,sc2,sc3,sc4,sc5 = st.columns(5)
-            sc1.metric("Mean",   f"{s['mean']:.1f}")
-            sc2.metric("Median", f"{fdf[uni_col].median():.1f}")
-            sc3.metric("Std",    f"{s['std']:.1f}")
-            sc4.metric("Min",    f"{s['min']:.1f}")
-            sc5.metric("Max",    f"{s['max']:.1f}")
 
-        elif uni_chart == "Box Plot":
-            group_by = st.selectbox("Group by", ["Cluster","Type of Crime"], key="uni_box_grp")
-            fig_uni = px.box(fdf, x=group_by, y=uni_col, color=group_by,
-                             color_discrete_sequence=PALETTE,
-                             title=f"Box Plot — {uni_col} by {group_by}")
-            fig_uni.update_layout(**PLOT_BASE, xaxis_tickangle=-30, showlegend=False)
-            st.plotly_chart(fig_uni, use_container_width=True)
+# ── Time series ─────────────────────────────────────────────────────────────
 
-        elif uni_chart == "Bar Chart (Mean by Cluster)":
-            agg_u = fdf.groupby("Cluster")[uni_col].mean().reset_index().sort_values(uni_col, ascending=True)
-            fig_uni = go.Figure(go.Bar(
-                x=agg_u[uni_col], y=agg_u["Cluster"], orientation="h",
-                marker_color="#e9c46a", opacity=0.8,
-                text=agg_u[uni_col].round(0).astype(int),
-                textposition="outside", textfont=dict(color="#566174", size=11),
-            ))
-            fig_uni.update_layout(**PLOT_BASE, title=f"Mean {uni_col} by Cluster",
-                                  xaxis_title=f"Mean {uni_col}", showlegend=False)
-            st.plotly_chart(fig_uni, use_container_width=True)
+def _time_series(df, PALETTE, PLOT_BASE):
+    st.markdown("## Time Series Explorer")
+    st.markdown('<p style="font-size:0.83rem;color:#566174;">Trends, year-on-year change, and '
+                'which clusters drive overall crime volume.</p>', unsafe_allow_html=True)
 
-        elif uni_chart == "Bar Chart (Total by Cluster)":
-            agg_u = fdf.groupby("Cluster")[uni_col].sum().reset_index().sort_values(uni_col, ascending=True)
-            fig_uni = go.Figure(go.Bar(
-                x=agg_u[uni_col], y=agg_u["Cluster"], orientation="h",
-                marker_color="#4895ef", opacity=0.8,
-                text=agg_u[uni_col].round(0).astype(int),
-                textposition="outside", textfont=dict(color="#566174", size=11),
-            ))
-            fig_uni.update_layout(**PLOT_BASE, title=f"Total {uni_col} by Cluster",
-                                  xaxis_title=f"Total {uni_col}", showlegend=False)
-            st.plotly_chart(fig_uni, use_container_width=True)
+    clusters = sorted(df["Cluster"].unique())
+    types = sorted(df["Type of Crime"].unique())
+    c1, c2 = st.columns(2)
+    sel_clusters = c1.multiselect("Clusters", clusters, default=clusters, key="ts_clusters")
+    sel_types = c2.multiselect("Crime Types", types, default=types, key="ts_types")
 
-        else:  # Mean by Crime Type
-            agg_u = fdf.groupby("Type of Crime")[uni_col].mean().reset_index().sort_values(uni_col, ascending=True)
-            fig_uni = go.Figure(go.Bar(
-                x=agg_u[uni_col], y=agg_u["Type of Crime"], orientation="h",
-                marker_color="#2dc653", opacity=0.8,
-                text=agg_u[uni_col].round(0).astype(int),
-                textposition="outside", textfont=dict(color="#566174", size=11),
-            ))
-            fig_uni.update_layout(**PLOT_BASE, title=f"Mean {uni_col} by Crime Type",
-                                  xaxis_title=f"Mean {uni_col}", showlegend=False)
-            st.plotly_chart(fig_uni, use_container_width=True)
+    fdf = df[df["Cluster"].isin(sel_clusters) & df["Type of Crime"].isin(sel_types)]
+    if fdf.empty:
+        st.warning("No data for this selection.")
+        return
 
-        # Descriptive stats table always shown
-        st.markdown('<div class="section-label">Full Descriptive Statistics</div>', unsafe_allow_html=True)
-        st.dataframe(fdf[NUMERIC].describe().T.round(2), use_container_width=True)
+    # Overall trend
+    st.markdown('<div class="section-label">Overall Trend</div>', unsafe_allow_html=True)
+    trend_by = st.radio("Break down by", ["Total", "Cluster", "Type of Crime"],
+                        horizontal=True, key="ts_trend_by")
+    if trend_by == "Total":
+        agg = fdf.groupby("year")["Crime Count"].sum().reset_index()
+        fig = px.line(agg, x="year", y="Crime Count", markers=True,
+                     color_discrete_sequence=PALETTE, title="Total Crime Count Over Time")
+    else:
+        group_col = "Cluster" if trend_by == "Cluster" else "Type of Crime"
+        agg = fdf.groupby(["year", group_col])["Crime Count"].sum().reset_index()
+        fig = px.line(agg, x="year", y="Crime Count", color=group_col, markers=True,
+                     color_discrete_sequence=PALETTE, title=f"Crime Count Over Time by {group_col}")
+    st.plotly_chart(_upd(fig, PLOT_BASE), use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # RQ1 — Top 5 locations with highest crime rate
-    # ══════════════════════════════════════════════════════════════════════════
-    with tabs[1]:
-        st.markdown("## What are the top locations with the highest crime rate?")
-        st.markdown(
-            '<p style="font-size:0.83rem;color:#566174;">Comparing total recorded incidents per cluster '
-            'helps identify where law enforcement resources are most urgently needed.</p>',
-            unsafe_allow_html=True)
+    ts_c1, ts_c2 = st.columns(2)
 
-        rq1c1, rq1c2 = st.columns([2, 1])
-        n_top = rq1c1.slider("Number of locations to show", 3, len(df["Cluster"].unique()), 5, key="rq1_n")
-        chart1 = rq1c2.selectbox("Chart Type",
-            ["Horizontal Bar", "Bar Chart", "Line Chart"], key="rq1_chart")
+    with ts_c1:
+        st.markdown('<div class="section-label">Year-on-Year Change</div>', unsafe_allow_html=True)
+        yoy = (fdf.groupby(["year", "Cluster"])["Crime Count"].sum()
+                  .groupby("Cluster").pct_change().mul(100).reset_index())
+        yoy.columns = ["year", "Cluster", "YoY %"]
+        yoy = yoy.dropna()
+        top_yoy_clusters = st.multiselect("Limit to clusters", clusters,
+                                          default=clusters[:min(6, len(clusters))], key="ts_yoy_clusters")
+        yoy_f = yoy[yoy["Cluster"].isin(top_yoy_clusters)]
+        fig_yoy = px.line(yoy_f, x="year", y="YoY %", color="Cluster", markers=True,
+                          color_discrete_sequence=PALETTE, title="Year-on-Year Crime Change (%)")
+        fig_yoy.add_hline(y=0, line_color="#2a3347", line_dash="dot")
+        st.plotly_chart(_upd(fig_yoy, PLOT_BASE), use_container_width=True)
 
-        # Use mean annual crime count per cluster to avoid inflating totals
-        # by summing across all years and all crime types simultaneously.
-        # Mean annual count reflects typical yearly crime burden per cluster.
-        cluster_total = (
-            fdf.groupby(["Cluster","year"])["Crime Count"].sum()  # total per cluster per year
-               .groupby("Cluster").mean()                          # average across years
-               .reset_index()
-               .rename(columns={"Crime Count":"Mean Annual Crime Count"})
-               .sort_values("Mean Annual Crime Count", ascending=False)
-               .head(n_top)
-        )
-        cluster_total["Crime Count"] = cluster_total["Mean Annual Crime Count"].round(0).astype(int)
+    with ts_c2:
+        st.markdown('<div class="section-label">Top Crime Regions</div>', unsafe_allow_html=True)
+        top_n = st.slider("Show top N clusters", 3, len(clusters), min(10, len(clusters)), key="ts_topn")
+        totals = (fdf.groupby(["Cluster", "year"])["Crime Count"].sum()
+                     .groupby("Cluster").mean().reset_index()
+                     .rename(columns={"Crime Count": "Mean Annual Crime Count"})
+                     .sort_values("Mean Annual Crime Count", ascending=False).head(top_n))
+        fig_top = px.bar(totals.sort_values("Mean Annual Crime Count"),
+                         x="Mean Annual Crime Count", y="Cluster", orientation="h",
+                         color_discrete_sequence=PALETTE, title=f"Top {top_n} Clusters by Mean Annual Crime Count")
+        st.plotly_chart(_upd(fig_top, PLOT_BASE), use_container_width=True)
 
-        fig1 = _render_chart(chart1, cluster_total,
-                             x="Cluster", y="Crime Count",
-                             color="Cluster", size_col="Crime Count",
-                             palette=PALETTE, base=PLOT_BASE,
-                             title=f"Top {n_top} Clusters by Total Crime Count")
-        fig1.update_layout(showlegend=False)
-        st.plotly_chart(fig1, use_container_width=True)
+    st.markdown('<div class="section-label">Crime Type Composition Over Time</div>', unsafe_allow_html=True)
+    ct_trend = fdf.groupby(["year", "Type of Crime"])["Crime Count"].sum().reset_index()
+    fig_ct = px.area(ct_trend, x="year", y="Crime Count", color="Type of Crime",
+                     color_discrete_sequence=PALETTE, title="Crime Count by Type — Stacked Trend")
+    st.plotly_chart(_upd(fig_ct, PLOT_BASE), use_container_width=True)
 
-        # Breakdown by crime type for the top clusters
-        st.markdown('<div class="section-label">Crime Type Breakdown — Top Clusters</div>', unsafe_allow_html=True)
-        top_names = cluster_total["Cluster"].tolist()
-        breakdown = (fdf[fdf["Cluster"].isin(top_names)]
-                       .groupby(["Cluster", "Type of Crime"])["Crime Count"]
-                       .sum().reset_index())
-        chart1b = st.selectbox("Breakdown Chart Type",
-            ["Bar Chart", "Horizontal Bar", "Area Chart"], key="rq1b_chart")
 
-        fig1b = _render_chart(chart1b, breakdown,
-                              x="Cluster", y="Crime Count",
-                              color="Type of Crime", size_col="Crime Count",
-                              palette=PALETTE, base=PLOT_BASE,
-                              title="Crime Type Split — Top Clusters")
-        st.plotly_chart(fig1b, use_container_width=True)
+# ── Enrichment justification ────────────────────────────────────────────────
 
-        # Summary table
-        st.markdown('<div class="section-label">Summary Table</div>', unsafe_allow_html=True)
-        tbl = cluster_total.copy()
-        tbl["% of Total"] = (tbl["Crime Count"] / fdf["Crime Count"].sum() * 100).round(2)
-        tbl["Rank"] = range(1, len(tbl) + 1)
-        st.dataframe(tbl[["Rank", "Cluster", "Crime Count", "% of Total"]].set_index("Rank"),
-                     use_container_width=True)
+def _justification(master_df, PALETTE, PLOT_BASE):
+    st.markdown("## Enrichment Justification")
+    st.markdown(
+        '<p style="font-size:0.83rem;color:#566174;">The central hypothesis: crime-only data is '
+        'feature-poor, and adding socioeconomic indicators should carry real predictive signal. '
+        'These are the checks run before committing to that framing.</p>',
+        unsafe_allow_html=True)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # RQ2 — When is crime most likely to occur?
-    # ══════════════════════════════════════════════════════════════════════════
-    with tabs[2]:
-        st.markdown("## When is crime most likely to occur?")
-        st.markdown(
-            '<p style="font-size:0.83rem;color:#566174;">Analysing crime by year reveals which periods '
-            'see the most activity. With annual data, year-level patterns show long-term surges and drops.</p>',
-            unsafe_allow_html=True)
+    corr_vals = {READABLE[s]: master_df[["Crime Count", s]].corr().iloc[0, 1] for s in SOCIO}
+    corr_df = pd.DataFrame(list(corr_vals.items()), columns=["Feature", "Correlation"])
+    corr_df = corr_df.sort_values("Correlation")
+    corr_df["Colour"] = corr_df["Correlation"].apply(lambda x: "#2dc653" if x > 0 else "#ff4b4b")
 
-        rq2c1, rq2c2 = st.columns([2, 1])
-        chart2 = rq2c1.selectbox("Chart Type",
-            ["Bar Chart", "Line Chart", "Area Chart", "Box Plot"], key="rq2_chart")
-        color2 = rq2c2.selectbox("Colour By", ["Cluster", "Type of Crime"], key="rq2_color")
+    fig = go.Figure(go.Bar(
+        x=corr_df["Correlation"], y=corr_df["Feature"], orientation="h",
+        marker_color=corr_df["Colour"].tolist(),
+        text=corr_df["Correlation"].round(3), textposition="outside",
+        textfont=dict(color="#566174", size=11),
+    ))
+    fig.add_vline(x=0, line_color="#2a3347", line_width=1)
+    _upd(fig, PLOT_BASE, title="Correlation with Crime Count — Socioeconomic Features",
+         xaxis_range=[-1, 1], showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
 
-        year_agg = fdf.groupby(["year", color2])["Crime Count"].sum().reset_index()
-        fig2 = _render_chart(chart2, year_agg,
-                             x="year", y="Crime Count",
-                             color=color2, size_col="Crime Count",
-                             palette=PALETTE, base=PLOT_BASE,
-                             title=f"Crime Count by Year — coloured by {color2}")
-        st.plotly_chart(fig2, use_container_width=True)
+    st.markdown('<div class="section-label">Multicollinearity Check</div>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:0.8rem;color:#566174;">Tree ensembles (Random Forest, XGBoost, '
+                'LightGBM, CatBoost) are not thrown off by correlated predictors the way linear models '
+                'are — they just split on whichever correlated feature helps most at each node. That\'s '
+                'why the enriched feature set keeps every raw socioeconomic column instead of applying '
+                'PCA or dropping collinear pairs.</p>', unsafe_allow_html=True)
+    corr_full = master_df[SOCIO].corr().round(3)
+    corr_full.index = [READABLE[c] for c in corr_full.index]
+    corr_full.columns = [READABLE[c] for c in corr_full.columns]
+    fig2 = px.imshow(corr_full, text_auto=True, aspect="auto", color_continuous_scale="RdBu_r",
+                     zmin=-1, zmax=1, title="Socioeconomic Feature Multicollinearity")
+    st.plotly_chart(_upd(fig2, PLOT_BASE), use_container_width=True)
 
-        # Annual total with trend line
-        st.markdown('<div class="section-label">Overall Annual Trend</div>', unsafe_allow_html=True)
-        annual_total = fdf.groupby("year")["Crime Count"].sum().reset_index()
-        fig2b = go.Figure()
-        fig2b.add_trace(go.Bar(x=annual_total["year"], y=annual_total["Crime Count"],
-                               marker_color="#e9c46a", opacity=0.7, name="Annual Total"))
-        # simple moving average
-        if len(annual_total) >= 3:
-            ma = annual_total["Crime Count"].rolling(3, center=True).mean()
-            fig2b.add_trace(go.Scatter(x=annual_total["year"], y=ma, mode="lines",
-                                       name="3-Year Moving Avg",
-                                       line=dict(color="#ff4b4b", width=2.5)))
-        _upd(fig2b, PLOT_BASE, title="Total Crimes per Year with 3-Year Moving Average",
-             xaxis_title="Year", yaxis_title="Total Crime Count")
-        st.plotly_chart(fig2b, use_container_width=True)
+    # ── VIF — quantifies collinearity per feature (not just pairwise) ──────
+    st.markdown('<div class="section-label">Variance Inflation Factor (VIF)</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:0.8rem;color:#566174;line-height:1.6;">'
+        'The correlation matrix above only shows pairs. VIF checks each feature against '
+        '<em>all the others at once</em> — VIF for feature X is 1 / (1 − R²) from regressing X on every '
+        'other socioeconomic feature. Above ~5 is usually flagged as concerning for linear models; '
+        'above ~10 is severe.</p>', unsafe_allow_html=True)
+    try:
+        from sklearn.linear_model import LinearRegression
+        vif_rows = []
+        socio_data = master_df[SOCIO].dropna()
+        for col in SOCIO:
+            others = [c for c in SOCIO if c != col]
+            r2 = LinearRegression().fit(socio_data[others], socio_data[col]).score(
+                socio_data[others], socio_data[col])
+            vif = float("inf") if r2 >= 0.999999 else 1.0 / (1.0 - r2)
+            vif_rows.append({"Feature": READABLE[col], "R² vs. other features": round(r2, 4),
+                             "VIF": round(vif, 1) if np.isfinite(vif) else "∞"})
+        vif_df = pd.DataFrame(vif_rows).sort_values("R² vs. other features", ascending=False)
+        st.dataframe(vif_df.set_index("Feature"), use_container_width=True)
 
-        # Peak year callout
-        peak_yr = annual_total.loc[annual_total["Crime Count"].idxmax()]
+        max_vif_row = vif_df.iloc[0]
+        if isinstance(max_vif_row["VIF"], (int, float)) and max_vif_row["VIF"] > 10:
+            severity, badge = "severe", "badge-critical"
+        elif isinstance(max_vif_row["VIF"], (int, float)) and max_vif_row["VIF"] > 5:
+            severity, badge = "moderate", "badge-high"
+        else:
+            severity, badge = "mild", "badge-low"
+
         st.markdown(f"""
         <div class="stat-card">
-          <div class="section-label">Peak Year</div>
-          <p style="font-size:0.83rem;color:#8892a4;margin:6px 0 0;">
-            The highest total crime count in the filtered dataset occurred in
-            <span style="color:#e9c46a;font-family:'DM Mono',monospace;">{int(peak_yr['year'])}</span>
-            with <span style="color:#e9c46a;font-family:'DM Mono',monospace;">{int(peak_yr['Crime Count']):,}</span> incidents.
+          <span class="{badge}">{severity.upper()} COLLINEARITY</span>
+          <p style="font-size:0.82rem;color:#8892a4;margin:10px 0 0;line-height:1.7;">
+            <b>This isn't a pipeline bug.</b> These four indicators are recorded as raw headcounts per
+            cluster (poor households, unemployed people, etc.), not rates — so all four naturally scale
+            with a cluster's population size. A more populous cluster tends to have more of everything
+            in absolute terms, which is exactly the kind of "size effect" that shows up as strong
+            correlation here. If Quantec exposes population totals for these clusters later, converting
+            these to per-capita rates (e.g. unemployment ÷ population) would separate the underlying
+            socioeconomic condition from cluster size and reduce this collinearity at the source.<br><br>
+            <b>Given no rate denominator is currently available, and the models are all tree ensembles,</b>
+            the practical fix isn't dropping features — collinear predictors don't bias tree splits or
+            hurt predictive accuracy, only individual-feature SHAP attribution (see the Feature
+            Importance page's "Grouped Importance" panel, which sums the correlated block into one
+            number instead of diluting credit across four highly related columns).
           </p>
         </div>
         """, unsafe_allow_html=True)
+    except Exception as e:
+        st.info(f"VIF computation skipped: {e}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # RQ3 — Seasonal patterns or long-term trends
-    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("""
+    <div class="stat-card">
+      <div class="section-label">Why This Shaped the Modelling Approach</div>
+      <p style="font-size:0.82rem;color:#8892a4;margin:6px 0 0;line-height:1.7;">
+        <b>Target:</b> reframed from predicting Cluster (classification) to predicting Crime Count
+        (regression) — the cluster-classification framing didn't hold up in practice.<br>
+        <b>Models:</b> Random Forest, XGBoost, LightGBM, CatBoost only — all tree ensembles, so no
+        scaling, log-transform, or PCA is needed, and multicollinearity between socioeconomic features
+        (visible above) doesn't hurt them.<br>
+        <b>Validation:</b> expanding-window walk-forward cross-validation, not a single train/test split
+        — Crime Count is a time series, so folds respect chronological order.<br>
+        <b>The actual test</b> of whether enrichment helps is the paired significance test on the
+        Model Performance page — this page only shows the raw correlations that motivated the hypothesis.
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ── Main render ──────────────────────────────────────────────────────────────
+
+def render(master_df: pd.DataFrame, crime_only_df, PALETTE: list, PLOT_BASE: dict):
+    st.markdown('<div class="section-label">Module 01</div>', unsafe_allow_html=True)
+    st.markdown("# Exploratory Data Analysis")
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+    dataset_choice = st.radio("Dataset", ["Master (Crime + Socioeconomic)", "Crime Only"],
+                              horizontal=True, key="eda_dataset")
+    active_df = master_df if dataset_choice.startswith("Master") else crime_only_df
+    if active_df is None:
+        st.warning("This dataset isn't loaded — upload it in the sidebar.")
+        return
+    active_df = _prep(active_df)
+
+    tabs = st.tabs(["Univariate Explorer", "Bivariate Explorer",
+                    "Time Series Explorer", "Enrichment Justification"])
+
+    with tabs[0]:
+        _univariate(active_df, PALETTE, PLOT_BASE)
+    with tabs[1]:
+        _bivariate(active_df, PALETTE, PLOT_BASE)
+    with tabs[2]:
+        _time_series(active_df, PALETTE, PLOT_BASE)
     with tabs[3]:
-        st.markdown("## Are there seasonal patterns or long-term trends in crime rates?")
-        st.markdown(
-            '<p style="font-size:0.83rem;color:#566174;">Looking at how crime changes year-on-year '
-            'and across clusters reveals structural trends versus short-term fluctuations.</p>',
-            unsafe_allow_html=True)
-
-        rq3c1, rq3c2 = st.columns([2, 1])
-        chart3 = rq3c1.selectbox("Chart Type",
-            ["Heatmap", "Line Chart", "Area Chart", "Bar Chart"], key="rq3_chart")
-        sel_cl3 = rq3c2.multiselect("Select Clusters",
-            sorted(fdf["Cluster"].unique()),
-            default=list(fdf["Cluster"].unique()[:5]), key="rq3_cl")
-
-        sub3 = fdf[fdf["Cluster"].isin(sel_cl3 or fdf["Cluster"].unique())]
-
-        if chart3 == "Heatmap":
-            pivot3 = sub3.pivot_table(values="Crime Count", index="Cluster",
-                                      columns="year", aggfunc="sum")
-            fig3 = _heatmap_pivot(pivot3, PLOT_BASE,
-                                  "Crime Intensity Heatmap — Cluster × Year", cs="YlOrBr")
+        if master_df is None:
+            st.warning("Enrichment justification needs the master dataset — upload it in the sidebar.")
         else:
-            ts3 = sub3.groupby(["year", "Cluster"])["Crime Count"].sum().reset_index()
-            fig3 = _render_chart(chart3, ts3, x="year", y="Crime Count",
-                                 color="Cluster", size_col="Crime Count",
-                                 palette=PALETTE, base=PLOT_BASE,
-                                 title="Crime Trend by Cluster over Time")
-        st.plotly_chart(fig3, use_container_width=True)
-
-        # Year-on-year % change
-        st.markdown('<div class="section-label">Year-on-Year Change (%)</div>', unsafe_allow_html=True)
-        yoy = (sub3.groupby(["year", "Cluster"])["Crime Count"].sum()
-                   .groupby("Cluster").pct_change().mul(100).reset_index())
-        yoy.columns = ["year", "Cluster", "YoY Change (%)"]
-        yoy = yoy.dropna()
-
-        chart3b = st.selectbox("YoY Chart Type",
-            ["Bar Chart", "Line Chart", "Scatter Plot"], key="rq3b_chart")
-        fig3b = _render_chart(chart3b, yoy,
-                              x="year", y="YoY Change (%)",
-                              color="Cluster", size_col=None,
-                              palette=PALETTE, base=PLOT_BASE,
-                              title="Year-on-Year Crime Change (%)")
-        if chart3b == "Bar Chart":
-            fig3b.update_layout(barmode="group")
-        fig3b.add_hline(y=0, line_color="#2a3347", line_dash="dot")
-        st.plotly_chart(fig3b, use_container_width=True)
-
-        # Crime type trend
-        st.markdown('<div class="section-label">Crime Type Long-term Trend</div>', unsafe_allow_html=True)
-        ct_trend = fdf.groupby(["year", "Type of Crime"])["Crime Count"].sum().reset_index()
-        chart3c = st.selectbox("Crime Type Trend Chart",
-            ["Line Chart", "Area Chart", "Bar Chart"], key="rq3c_chart")
-        fig3c = _render_chart(chart3c, ct_trend,
-                              x="year", y="Crime Count",
-                              color="Type of Crime", size_col="Crime Count",
-                              palette=PALETTE, base=PLOT_BASE,
-                              title="Crime Count by Type — Annual Trend")
-        st.plotly_chart(fig3c, use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # RQ4 — How frequently do hotspots persist vs dissipate?
-    # ══════════════════════════════════════════════════════════════════════════
-    with tabs[4]:
-        st.markdown("## How frequently do hotspots persist versus dissipate over time?")
-        st.markdown(
-            '<p style="font-size:0.83rem;color:#566174;">A cluster is flagged as a hotspot in a given year '
-            'if its crime count exceeds the 75th percentile across all clusters that year. '
-            'Persistence is measured by how many consecutive years a cluster stays in the top tier.</p>',
-            unsafe_allow_html=True)
-
-        # Build hotspot flag per cluster per year
-        yr_agg = fdf.groupby(["year", "Cluster"])["Crime Count"].sum().reset_index()
-        thresh_by_year = yr_agg.groupby("year")["Crime Count"].quantile(0.75).rename("q75")
-        yr_agg = yr_agg.merge(thresh_by_year, on="year")
-        yr_agg["Hotspot"] = yr_agg["Crime Count"] >= yr_agg["q75"]
-
-        # Persistence count
-        persist = yr_agg.groupby("Cluster")["Hotspot"].sum().reset_index()
-        persist.columns = ["Cluster", "Years as Hotspot"]
-        persist = persist.sort_values("Years as Hotspot", ascending=False)
-        total_years = yr_agg["year"].nunique()
-        persist["% Time as Hotspot"] = (persist["Years as Hotspot"] / total_years * 100).round(1)
-        persist["Status"] = persist["Years as Hotspot"].apply(
-            lambda x: "Persistent" if x >= total_years * 0.6
-            else "Intermittent" if x >= total_years * 0.3
-            else "Transient")
-
-        rq4c1, rq4c2 = st.columns([2, 1])
-        chart4 = rq4c1.selectbox("Chart Type",
-            ["Horizontal Bar", "Bar Chart", "Scatter Plot"], key="rq4_chart")
-
-        fig4 = _render_chart(chart4, persist,
-                             x="Cluster", y="Years as Hotspot",
-                             color="Status", size_col="Years as Hotspot",
-                             palette=["#ff4b4b", "#e9c46a", "#2dc653"],
-                             base=PLOT_BASE,
-                             title="Hotspot Persistence — Years Each Cluster Exceeded 75th Percentile")
-        st.plotly_chart(fig4, use_container_width=True)
-
-        # Hotspot presence over time — tile chart
-        st.markdown('<div class="section-label">Hotspot Presence — Year by Cluster</div>', unsafe_allow_html=True)
-        pivot4 = yr_agg.pivot_table(values="Hotspot", index="Cluster",
-                                    columns="year", aggfunc="sum").fillna(0)
-        fig4b = px.imshow(pivot4.astype(int), aspect="auto",
-                          color_continuous_scale=["#0c1220", "#e9c46a"],
-                          title="Hotspot Flag per Year (1 = Above 75th Percentile)")
-        fig4b.update_coloraxes(colorbar_tickfont_color="#566174", showscale=False)
-        _upd(fig4b, PLOT_BASE)
-        st.plotly_chart(fig4b, use_container_width=True)
-
-        st.markdown('<div class="section-label">Persistence Classification</div>', unsafe_allow_html=True)
-        tbl4 = persist[["Cluster", "Years as Hotspot", "% Time as Hotspot", "Status"]].set_index("Cluster")
-        st.dataframe(tbl4, use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # RQ5 — What factors contribute most to predicting crime?
-    # ══════════════════════════════════════════════════════════════════════════
-    with tabs[5]:
-        st.markdown("## What factors contribute most to predicting crime?")
-        st.markdown(
-            '<p style="font-size:0.83rem;color:#566174;">Exploring how socioeconomic variables relate '
-            'to crime count shows which features carry predictive signal. '
-            'Strong correlations suggest a variable will be useful in the model.</p>',
-            unsafe_allow_html=True)
-
-        SOCIO = ["population_density", "poor_households",
-                 "population_unemployment", "population_education"]
-        SOCIO_LABEL = {s: READABLE[s] for s in SOCIO}
-
-        # Correlation bar — each socioeconomic feature vs Crime Count
-        corr_vals = {READABLE[s]: fdf[["Crime Count", s]].corr().iloc[0, 1] for s in SOCIO}
-        corr_df = pd.DataFrame(list(corr_vals.items()), columns=["Feature", "Correlation"])
-        corr_df = corr_df.sort_values("Correlation", ascending=True)
-        corr_df["Colour"] = corr_df["Correlation"].apply(lambda x: "#2dc653" if x > 0 else "#ff4b4b")
-
-        fig5a = go.Figure(go.Bar(
-            x=corr_df["Correlation"], y=corr_df["Feature"],
-            orientation="h",
-            marker_color=corr_df["Colour"].tolist(),
-            text=corr_df["Correlation"].round(3),
-            textposition="outside",
-            textfont=dict(color="#566174", size=11),
-        ))
-        fig5a.add_vline(x=0, line_color="#2a3347", line_width=1)
-        _upd(fig5a, PLOT_BASE,
-             title="Correlation with Crime Count — Socioeconomic Features",
-             xaxis_title="Pearson Correlation",
-             xaxis_range=[-1, 1], showlegend=False)
-        st.plotly_chart(fig5a, use_container_width=True)
-
-        # Interactive scatter — choose socioeconomic feature vs crime count
-        st.markdown('<div class="section-label">Relationship Explorer</div>', unsafe_allow_html=True)
-        r5c1, r5c2, r5c3 = st.columns(3)
-        sel_feat = r5c1.selectbox("Socioeconomic Feature",
-            [READABLE[s] for s in SOCIO], key="rq5_feat")
-        chart5b   = r5c2.selectbox("Chart Type",
-            ["Scatter Plot", "Box Plot", "Bar Chart", "Histogram"], key="rq5_chart")
-        color5    = r5c3.selectbox("Colour By", ["Cluster", "Type of Crime"], key="rq5_color")
-
-        raw_feat = {v: k for k, v in READABLE.items()}[sel_feat]
-        sample5 = fdf.sample(min(len(fdf), 1500), random_state=42)
-
-        if chart5b == "Histogram":
-            fig5b = _histogram(sample5, raw_feat, color5, PALETTE, PLOT_BASE,
-                               title=f"Distribution of {sel_feat}")
-        elif chart5b == "Box Plot":
-            fig5b = _box(sample5, color5, "Crime Count", color5, PALETTE, PLOT_BASE,
-                         title=f"Crime Count Distribution by {color5}")
-        elif chart5b == "Bar Chart":
-            agg5 = sample5.groupby([color5, raw_feat])["Crime Count"].mean().reset_index()
-            fig5b = _bar(agg5, color5, "Crime Count", color5, PALETTE, PLOT_BASE,
-                         title=f"Avg Crime Count by {color5}")
-        else:
-            fig5b = _scatter(sample5, raw_feat, "Crime Count", color5,
-                             "Crime Count", PALETTE, PLOT_BASE,
-                             title=f"{sel_feat} vs Crime Count (with trend line)")
-        st.plotly_chart(fig5b, use_container_width=True)
-
-        # Full correlation matrix
-        st.markdown('<div class="section-label">Full Correlation Matrix</div>', unsafe_allow_html=True)
-        corr_full = fdf[NUMERIC].corr().round(3)
-        corr_full.index   = [READABLE.get(c, c) for c in corr_full.index]
-        corr_full.columns = [READABLE.get(c, c) for c in corr_full.columns]
-        fig5c = px.imshow(corr_full, text_auto=True, aspect="auto",
-                          color_continuous_scale="RdBu_r",
-                          title="Pearson Correlation — All Numeric Features",
-                          zmin=-1, zmax=1)
-        _upd(fig5c, PLOT_BASE)
-        fig5c.update_coloraxes(colorbar_tickfont_color="#566174")
-        st.plotly_chart(fig5c, use_container_width=True)
-
-        st.markdown("""
-        <div class="stat-card">
-          <div class="section-label">How to Read This</div>
-          <p style="font-size:0.82rem;color:#8892a4;margin:6px 0 0;line-height:1.6;">
-            Values close to <span style="color:#2dc653;font-family:'DM Mono',monospace;">+1</span>
-            mean the two features increase together — a strong positive predictor of crime.
-            Values close to <span style="color:#ff4b4b;font-family:'DM Mono',monospace;">–1</span>
-            mean they move in opposite directions.
-            Values near <span style="font-family:'DM Mono',monospace;">0</span> suggest little linear relationship.
-            Features with high absolute correlation to Crime Count are the most useful predictors for the model.
-          </p>
-        </div>
-        """, unsafe_allow_html=True)
+            _justification(_prep(master_df), PALETTE, PLOT_BASE)

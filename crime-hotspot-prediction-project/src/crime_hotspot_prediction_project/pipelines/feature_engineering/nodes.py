@@ -1,4 +1,15 @@
-"""Feature Engineering Nodes.
+"""Feature Engineering — Streamlit-side copy.
+
+This is a byte-for-byte copy of `feature_engineering/nodes.py` from the Kedro
+pipeline (data_preprocessing -> feature_engineering stage). It's duplicated
+here — rather than imported from the Kedro package — so the Streamlit app has
+no hard dependency on the Kedro project being importable/installed; it only
+needs the trained `.pkl` models and a raw dataset upload.
+
+IMPORTANT: if you change lag_periods / rolling_windows in parameters.yml and
+retrain, the SAME values must be set in the sidebar's "Feature Engineering
+Parameters" panel here, or the feature matrix built for SHAP/Predict won't
+match what the saved models were actually trained on.
 
 Reframed for regression: the target is now ``Crime Count`` (not ``Cluster``).
 ``Cluster`` and ``Type of Crime`` become categorical predictors. Since every

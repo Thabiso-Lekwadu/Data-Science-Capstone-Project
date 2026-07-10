@@ -1,6 +1,12 @@
 """
 Crime Hotspot Prediction – Intelligence Dashboard
 Run: streamlit run App.py --server.port 8503
+
+STRICTLY upload-driven: nothing on any page renders until the relevant
+file(s) have been uploaded in this sidebar. There is no fallback to a local
+data/ folder or any other default — closing/reopening the browser or
+restarting the app clears everything back to empty, and pages only ever
+reflect what's actually been uploaded in the current session.
 """
 from __future__ import annotations
 import sys
@@ -64,11 +70,13 @@ div[data-testid="stFileUploader"] label p { color: #566174 !important; font-size
 
 import pandas as pd
 
-DATA_DIR   = Path("/app/data")
-MODELS     = ["KNN","RandomForest","GradientBoosting","XGBoost"]
-CONDITIONS = ["crime_only","master"]
-PALETTE    = ["#e9c46a","#4895ef","#ff4b4b","#2dc653","#b48ead",
-               "#f4a261","#64b5f6","#ef9a9a","#66bb6a","#ce93d8"]
+from model_utils import (
+    MODEL_NAMES, CONDITIONS, engineer_features, required_raw_columns_present,
+    load_uploaded_models, models_for_condition,
+)
+
+PALETTE    = ["#e9c46a", "#4895ef", "#ff4b4b", "#2dc653", "#b48ead",
+              "#f4a261", "#64b5f6", "#ef9a9a", "#66bb6a", "#ce93d8"]
 PLOT_BASE  = dict(
     paper_bgcolor="#0c1220", plot_bgcolor="#070b14",
     font=dict(color="#566174", family="DM Sans"),
@@ -91,85 +99,130 @@ with st.sidebar:
 
     page = st.radio("page", [
         "Exploratory Analysis",
+        "SHAP Feature Importance",
         "Model Performance",
-        "Command Dashboard",
+        "Prediction Explorer",
     ])
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Data Sources</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Data Sources — Upload Only</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:0.72rem;color:#566174;line-height:1.5;margin-bottom:10px;">'
+        'Nothing renders until you upload it here. There is no local-disk fallback — '
+        'restart the app or clear an upload and the corresponding charts disappear.</p>',
+        unsafe_allow_html=True)
 
-    up_master      = st.file_uploader("master_dataset.xlsx",          type=["xlsx","csv"])
-    up_crime_only  = st.file_uploader("crime_processed.xlsx",         type=["xlsx","csv"])
-    up_results     = st.file_uploader("experiment_results.xlsx",      type=["xlsx","csv"])
+    up_master = st.file_uploader(
+        "① Master dataset (crime + socioeconomic)", type=["xlsx", "csv"],
+        help="master_dataset.xlsx — the raw merged dataset (date, Cluster, Type of Crime, "
+             "Crime Count, socioeconomic columns), BEFORE feature engineering. "
+             "Powers Exploratory Analysis directly, and is automatically feature-engineered "
+             "in-app (one-hot + lag/rolling) to power SHAP and Prediction Explorer for the "
+             "'master' condition — you do not need a second, pre-engineered upload for this.")
+    up_crime_only = st.file_uploader(
+        "② Crime-only dataset", type=["xlsx", "csv"],
+        help="crime_processed.xlsx — same shape as ① but without socioeconomic columns. "
+             "A genuinely different dataset (the baseline condition), not a duplicate of ①. "
+             "Powers Exploratory Analysis and, engineered in-app, the 'crime_only' condition "
+             "on SHAP and Prediction Explorer.")
+
+    st.markdown('<div class="section-label" style="margin-top:14px;">Trained Models</div>', unsafe_allow_html=True)
+    up_models = st.file_uploader(
+        "③ Model files (.pkl)", type=["pkl"], accept_multiple_files=True,
+        help="Upload the .pkl files from your Kedro run's data/06_models/ — e.g. "
+             "randomforest_master.pkl, xgboost_crime_only.pkl. Matched automatically by "
+             "filename. Needed for SHAP and Prediction Explorer.")
+
+    st.markdown('<div class="section-label" style="margin-top:14px;">CV Results</div>', unsafe_allow_html=True)
+    up_per_fold = st.file_uploader(
+        "④ Per-fold CV results", type=["xlsx", "csv"],
+        help="experiment_results_per_fold.xlsx. Powers Model Performance.")
+    up_summary = st.file_uploader(
+        "⑤ CV summary", type=["xlsx", "csv"],
+        help="experiment_results_summary.xlsx. Powers Model Performance.")
+    up_sig = st.file_uploader(
+        "⑥ Significance tests", type=["xlsx", "csv"],
+        help="experiment_significance_tests.xlsx. Powers Model Performance.")
+
+    if st.button("🗑 Clear everything", help="Drops all cached uploads/computations for this session."):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-    st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#2a3347;padding-bottom:8px;">v1.0 — Capstone Project</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#2a3347;padding-bottom:8px;">v3.0 — Capstone Project (upload-only)</div>', unsafe_allow_html=True)
 
 
-# ── Data loading ─────────────────────────────────────────────────────────────
-@st.cache_data
+# ── Data loading — upload only, nothing else ────────────────────────────────
+@st.cache_data(show_spinner=False)
 def _load_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
     import io
     buf = io.BytesIO(file_bytes)
     return pd.read_csv(buf) if filename.endswith(".csv") else pd.read_excel(buf, engine="openpyxl")
 
 
-@st.cache_data
-def _load_path(path_str: str) -> pd.DataFrame | None:
-    p = Path(path_str)
-    if not p.exists():
-        return None
+def _resolve_upload(uploaded, label: str):
+    """Returns (dataframe_or_None, has_data_bool). No disk fallback of any kind."""
+    if uploaded is None:
+        return None, False
     try:
-        return pd.read_excel(p, engine="openpyxl") if path_str.endswith("xlsx") else pd.read_csv(p)
-    except Exception:
-        return None
+        return _load_file(uploaded.getvalue(), uploaded.name), True
+    except Exception as e:
+        st.sidebar.error(f"Could not read {label}: {e}")
+        return None, False
 
 
-def _resolve(uploaded, docker_path: Path) -> pd.DataFrame | None:
-    if uploaded is not None:
-        try:
-            return _load_file(uploaded.getvalue(), uploaded.name)
-        except Exception as e:
-            st.sidebar.error(f"Could not read file: {e}")
-            return None
-    return _load_path(str(docker_path))
+master_df,     has_master = _resolve_upload(up_master,     "master dataset")
+crime_only_df, has_crime  = _resolve_upload(up_crime_only,  "crime-only dataset")
+per_fold_df,   has_pf     = _resolve_upload(up_per_fold,    "per-fold results")
+summary_df,    has_summ   = _resolve_upload(up_summary,     "CV summary")
+sig_df,        has_sig    = _resolve_upload(up_sig,         "significance tests")
 
+# Uploaded models — matched to (model_name, condition) by filename pattern
+uploaded_models, unmatched_model_files = load_uploaded_models(up_models)
+if unmatched_model_files:
+    st.sidebar.warning(
+        f"{len(unmatched_model_files)} uploaded file(s) didn't match an expected model filename "
+        f"and were skipped: {', '.join(unmatched_model_files)}")
 
-def _prep_master(df):
-    if df is None:
-        return None
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    if "year" not in df.columns:
-        df["year"] = df["date"].dt.year
-    return df
+# On-the-fly feature engineering, derived from the raw uploads — this is what
+# replaces the old separate "master_dataset_features.xlsx" upload. Computed
+# lazily (only if the corresponding raw dataset was uploaded), cached by the
+# raw data's own content.
+master_feat, crime_feat = None, None
+if has_master:
+    err = required_raw_columns_present(master_df)
+    if err:
+        st.sidebar.error(f"Master dataset: {err}")
+    else:
+        master_feat = engineer_features(master_df.to_json())
+if has_crime:
+    err = required_raw_columns_present(crime_only_df)
+    if err:
+        st.sidebar.error(f"Crime-only dataset: {err}")
+    else:
+        crime_feat = engineer_features(crime_only_df.to_json())
 
-
-def _prep_crime_only(df):
-    """
-    crime_processed has: date, Cluster, Type of Crime, Crime Count.
-    Add year column if missing.
-    """
-    if df is None:
-        return None
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    if "year" not in df.columns:
-        df["year"] = df["date"].dt.year
-    return df
-
-
-master_df     = _prep_master(_resolve(up_master,     DATA_DIR / "03_primary/master_dataset.xlsx"))
-crime_only_df = _prep_crime_only(_resolve(up_crime_only, DATA_DIR / "02_intermediate/crime_processed.xlsx"))
-results_df    = _resolve(up_results, DATA_DIR / "08_reporting/experiment_comparison.xlsx")
-
-# Derive cluster list from whichever dataset is available
-CLUSTERS = (
-    sorted(master_df["Cluster"].unique().tolist())     if master_df is not None
-    else sorted(crime_only_df["Cluster"].unique().tolist()) if crime_only_df is not None
-    else ["Bela Bela","Buffalo City","Cape Town","Ekurhuleni","eThekwini",
-          "Johannesburg","Mangaung","Msunduzi","Nelson Mandela Bay","Tshwane"]
-)
+# Visible, page-agnostic proof of what's actually driving the charts right now.
+_SOURCE_ROWS = [
+    ("① master_dataset (raw)",        master_df,      has_master),
+    ("② crime_processed (raw)",       crime_only_df,  has_crime),
+    ("   → engineered (master)",      master_feat,    master_feat is not None),
+    ("   → engineered (crime_only)",  crime_feat,      crime_feat is not None),
+    ("③ trained models",              None,            len(uploaded_models) > 0),
+    ("④ experiment_results_per_fold", per_fold_df,     has_pf),
+    ("⑤ experiment_results_summary",  summary_df,      has_summ),
+    ("⑥ experiment_significance_tests", sig_df,        has_sig),
+]
+with st.expander("📡  Active data sources — nothing below exists until it's uploaded", expanded=False):
+    for _name, _df, _present in _SOURCE_ROWS:
+        _icon = "🟢" if _present else "⚪"
+        if _name.startswith("③"):
+            _detail = f"{len(uploaded_models)} model file(s) matched" if _present else "not uploaded"
+        else:
+            _detail = f"{len(_df):,} rows" if (_df is not None) else "not uploaded"
+        st.markdown(f'<span style="font-family:\'DM Mono\',monospace;font-size:0.78rem;">'
+                    f'{_icon} <b>{_name}</b> — {_detail}</span>', unsafe_allow_html=True)
 
 
 # ── Upload gate ───────────────────────────────────────────────────────────────
@@ -179,12 +232,12 @@ def _gate(ready: bool, needed: str) -> bool:
         <div style="background:#0c1220;border:1px solid #1a2235;border-radius:10px;
                     padding:3rem 2rem;text-align:center;margin-top:3rem;">
           <div style="font-family:'DM Mono',monospace;font-size:0.62rem;letter-spacing:0.14em;
-                      color:#566174;text-transform:uppercase;margin-bottom:10px;">No Data Loaded</div>
+                      color:#566174;text-transform:uppercase;margin-bottom:10px;">No Data Uploaded</div>
           <div style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;
                       color:#e2e8f0;margin-bottom:8px;">Upload required to continue</div>
           <div style="font-size:0.83rem;color:#566174;line-height:1.7;">
             Upload <span style="font-family:'DM Mono',monospace;color:#e9c46a;">{needed}</span>
-            via the sidebar to view this page.
+            via the sidebar to view this page. Nothing is loaded from disk automatically.
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -194,18 +247,25 @@ def _gate(ready: bool, needed: str) -> bool:
 
 # ── Route ─────────────────────────────────────────────────────────────────────
 if page == "Exploratory Analysis":
-    if _gate(master_df is not None, "master_dataset.xlsx"):
+    if _gate(master_df is not None or crime_only_df is not None,
+             "① master dataset (or at least ② crime-only dataset)"):
         from pages_eda import render
         render(master_df, crime_only_df, PALETTE, PLOT_BASE)
 
-elif page == "Model Performance":
-    if _gate(results_df is not None, "experiment_results.xlsx"):
-        from pages_model import render
-        render(results_df, PALETTE, PLOT_BASE, MODELS, CONDITIONS,
-               master_df=master_df, crime_only_df=crime_only_df)
+elif page == "SHAP Feature Importance":
+    if _gate(master_feat is not None or crime_feat is not None,
+             "① master dataset (or ② crime-only dataset) — features are engineered automatically"):
+        from pages_shap import render
+        render(master_feat, crime_feat, uploaded_models, PALETTE, PLOT_BASE, MODEL_NAMES, CONDITIONS)
 
-else:
-    needed = "master_dataset.xlsx  +  experiment_results.xlsx"
-    if _gate(master_df is not None and results_df is not None, needed):
-        from pages_bi import render
-        render(master_df, results_df, PALETTE, PLOT_BASE, CLUSTERS, MODELS, CONDITIONS)
+elif page == "Model Performance":
+    if _gate(per_fold_df is not None and summary_df is not None,
+             "④ per-fold CV results + ⑤ CV summary"):
+        from pages_model import render
+        render(per_fold_df, summary_df, sig_df, PALETTE, PLOT_BASE, MODEL_NAMES, CONDITIONS)
+
+else:  # Prediction Explorer
+    if _gate(master_feat is not None,
+             "① master dataset — features are engineered automatically"):
+        from pages_predict import render
+        render(master_feat, uploaded_models, PALETTE, PLOT_BASE)

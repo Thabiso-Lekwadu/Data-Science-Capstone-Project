@@ -1,448 +1,182 @@
-"""Page 2 — Model Performance Analysis
+"""Page 2 — Model Performance (regression).
 
-Performance design:
-- All sklearn imports at module level (loaded once)
-- All expensive computations wrapped in @st.cache_data
-- PCA computed once and cached by (condition, data hash)
-- ROC/PR data computed once and cached
-- Figures built from cached data — only layout rerenders on interaction
+Everything on this page is real: per-fold walk-forward CV metrics,
+the mean/std summary, and the paired significance tests computed by
+model_training_nodes.py. No simulated data.
 """
 from __future__ import annotations
 
-import hashlib
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-# ── All sklearn imports at top level — loaded once, not on every widget click ──
-from sklearn.metrics import (
-    roc_curve, auc as sk_auc,
-    precision_recall_curve, average_precision_score,
-    roc_auc_score, confusion_matrix,
-)
-
-CHANCE_LEVEL = 0.15
-METRICS = ["accuracy", "f1_macro", "f1_weighted", "precision_macro", "recall_macro"]
-METRIC_LABELS = {
-    "accuracy":        "Accuracy",
-    "f1_macro":        "F1 Macro",
-    "f1_weighted":     "F1 Weighted",
-    "precision_macro": "Precision",
-    "recall_macro":    "Recall",
-}
+METRICS = ["rmse", "mae", "r2", "smape"]
+METRIC_LABELS = {"rmse": "RMSE", "mae": "MAE", "r2": "R²", "smape": "SMAPE (%)"}
+LOWER_IS_BETTER = {"rmse", "mae", "smape"}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _df_hash(df: pd.DataFrame) -> str:
-    """Fast hash of a dataframe for cache keys."""
-    return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()[:12]
+def _upd(fig, base, **kw):
+    fig.update_layout(**{**base, **kw})
+    return fig
 
 
-def _correct_scores(scores: np.ndarray, labels: np.ndarray):
-    try:
-        if roc_auc_score(labels, scores) < 0.5:
-            return 1.0 - scores, True
-    except Exception:
-        pass
-    return scores, False
-
-
-def _correct_metrics_df(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["metrics_corrected"] = False
-    metric_cols = [c for c in METRICS if c in df.columns]
-    for idx, row in df.iterrows():
-        if float(row.get("accuracy", 1.0)) < CHANCE_LEVEL * 2:
-            for col in metric_cols:
-                df.at[idx, col] = round(1.0 - float(row[col]), 4)
-            df.at[idx, "metrics_corrected"] = True
-    return df
-
-
-# ── Cached expensive computations ─────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False)
-def _cached_roc_data(results_hash: str, fres_json: str) -> dict:
-    """
-    Generate ROC/PR score arrays once per unique results_df.
-    Cached by hash — only recomputes when the uploaded file changes.
-    """
-    fres = pd.read_json(fres_json)
-    rng  = np.random.default_rng(42)
-    out  = {}
-    for _, row in fres.iterrows():
-        skill = float(np.clip(row["f1_weighted"], 0.50, 0.99))
-        n = 600
-        scores = rng.beta(skill * 8, (1 - skill) * 8 + 0.5, n)
-        labels = (scores + rng.normal(0, 0.12, n) > 0.5).astype(int)
-        scores, _ = _correct_scores(scores, labels)
-        out[f"{row['model']}|{row['condition']}"] = {
-            "scores": scores.tolist(),
-            "labels": labels.tolist(),
-        }
-    return out
-
-
-
-def _cached_roc_curves(roc_json: str, model: str, condition: str):
-    """Compute one ROC curve from cached score data."""
-    import json
-    roc = json.loads(roc_json)
-    key = f"{model}|{condition}"
-    if key not in roc:
-        return None
-    d = roc[key]
-    scores = np.array(d["scores"])
-    labels = np.array(d["labels"])
-    fpr, tpr, _ = roc_curve(labels, scores)
-    auc_val = sk_auc(fpr, tpr)
-    return {"fpr": fpr.tolist(), "tpr": tpr.tolist(), "auc": auc_val}
-
-
-def _cached_pr_curves(roc_json: str, model: str, condition: str):
-    """Compute one PR curve from cached score data."""
-    import json
-    roc = json.loads(roc_json)
-    key = f"{model}|{condition}"
-    if key not in roc:
-        return None
-    d = roc[key]
-    scores = np.array(d["scores"])
-    labels = np.array(d["labels"])
-    prec, rec, _ = precision_recall_curve(labels, scores)
-    ap = average_precision_score(labels, scores)
-    return {"prec": prec.tolist(), "rec": rec.tolist(), "ap": ap}
-
-
-# ── Main render ───────────────────────────────────────────────────────────────
-
-def render(results_df: pd.DataFrame, PALETTE: list, PLOT_BASE: dict,
-           MODELS: list, CONDITIONS: list,
-           master_df=None, crime_only_df=None):
+def render(per_fold_df: pd.DataFrame, summary_df: pd.DataFrame,
+           significance_df: pd.DataFrame, PALETTE: list, PLOT_BASE: dict,
+           MODELS: list, CONDITIONS: list):
 
     st.markdown('<div class="section-label">Module 02</div>', unsafe_allow_html=True)
     st.markdown("# Model Performance")
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-    required = {"model", "condition", "accuracy", "f1_macro", "f1_weighted",
-                "precision_macro", "recall_macro"}
-    if required - set(results_df.columns):
-        st.error(f"Uploaded file is missing columns: {required - set(results_df.columns)}")
+    if per_fold_df is None or summary_df is None:
+        st.warning("Upload experiment_results_per_fold.xlsx and experiment_results_summary.xlsx "
+                  "in the sidebar to see model performance.")
         return
 
-    results_df  = _correct_metrics_df(results_df)
-    res_hash    = _df_hash(results_df)
-    # Serialise once for cache — only re-serialise when file changes
-    fres_json   = results_df.to_json()
+    required = {"model", "condition", "rmse", "mae", "r2", "smape", "fold"}
+    if required - set(per_fold_df.columns):
+        st.error(f"Per-fold results file is missing columns: {required - set(per_fold_df.columns)}")
+        return
 
-    # ── Selectors ─────────────────────────────────────────────────────────────
+    models_present = sorted(per_fold_df["model"].unique())
+    conds_present = sorted(per_fold_df["condition"].unique())
+
     s1, s2 = st.columns(2)
-    sel_models = s1.multiselect("Models",    MODELS,     default=MODELS)
-    sel_conds  = s2.multiselect("Condition", CONDITIONS, default=CONDITIONS)
+    sel_models = s1.multiselect("Models", models_present, default=models_present)
+    sel_conds = s2.multiselect("Condition", conds_present, default=conds_present)
     if not sel_models or not sel_conds:
         st.warning("Select at least one model and condition.")
         return
 
-    fres = results_df[
-        results_df["model"].isin(sel_models) &
-        results_df["condition"].isin(sel_conds)
-    ].copy()
+    pf = per_fold_df[per_fold_df["model"].isin(sel_models) & per_fold_df["condition"].isin(sel_conds)].copy()
+    summ = summary_df[summary_df["model"].isin(sel_models) & summary_df["condition"].isin(sel_conds)].copy()
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
-    best = fres.sort_values("f1_weighted", ascending=False).iloc[0]
+    best = summ.sort_values("rmse_mean").iloc[0]
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Best Model",      f"{best['model']} / {best['condition']}")
-    k2.metric("Accuracy",        f"{best['accuracy']:.3f}")
-    k3.metric("F1 Weighted",     f"{best['f1_weighted']:.3f}")
-    k4.metric("Precision Macro", f"{best['precision_macro']:.3f}")
-    k5.metric("Recall Macro",    f"{best['recall_macro']:.3f}")
+    k1.metric("Best Model", f"{best['model']} / {best['condition']}")
+    k2.metric("RMSE", f"{best['rmse_mean']:.1f}", f"±{best['rmse_std']:.1f}")
+    k3.metric("MAE", f"{best['mae_mean']:.1f}", f"±{best['mae_std']:.1f}")
+    k4.metric("R²", f"{best['r2_mean']:.3f}", f"±{best['r2_std']:.3f}")
+    k5.metric("SMAPE", f"{best['smape_mean']:.1f}%", f"±{best['smape_std']:.1f}")
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
-    # Pre-compute ROC data once (cached)
-    roc_cache = _cached_roc_data(res_hash, fres_json)
-    import json
-    roc_json = json.dumps(roc_cache)
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Summary Comparison", "Per-Fold Detail", "Significance Tests", "Leaderboard"])
 
-    base_pb  = {k: v for k, v in PLOT_BASE.items() if k not in ("xaxis", "yaxis")}
-    ax_style = dict(gridcolor="#1a2235", linecolor="#1a2235",
-                    tickfont=dict(color="#566174"))
-
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Metrics", "ROC Curves", "PR Curves", "Feature Importance"
-    ])
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1 – METRICS
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 1 — Summary comparison
+    # ══════════════════════════════════════════════════════════════════════
     with tab1:
+        metric = st.selectbox("Metric", METRICS, format_func=lambda m: METRIC_LABELS[m], key="mp_metric")
+        summ_sorted = summ.sort_values(f"{metric}_mean", ascending=(metric in LOWER_IS_BETTER))
+        fig = go.Figure()
         for cond in sel_conds:
-            sub = fres[fres["condition"] == cond].copy()
-            if sub.empty:
-                continue
-            melted = sub.melt(id_vars=["model"], value_vars=METRICS,
-                              var_name="Metric", value_name="Score")
-            melted["Metric"] = melted["Metric"].map(METRIC_LABELS)
-            fig = px.bar(melted, x="model", y="Score", color="Metric",
-                         barmode="group", color_discrete_sequence=PALETTE,
-                         title=f"Model Metrics — {cond.replace('_',' ').title()} Dataset",
-                         text_auto=".3f")
-            fig.update_traces(textposition="outside", textfont_size=10)
-            fig.update_layout(**PLOT_BASE, height=380,
-                              yaxis_range=[0, 1.1], bargap=0.2, bargroupgap=0.05)
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Dot chart
-        st.markdown('<div class="section-label">Score Comparison — All Models</div>',
-                    unsafe_allow_html=True)
-        fig_dot = go.Figure()
-        for i, (_, row) in enumerate(fres.iterrows()):
-            sym = "circle" if row["condition"] == "master" else "circle-open"
-            col = PALETTE[MODELS.index(row["model"]) % len(PALETTE)] \
-                  if row["model"] in MODELS else PALETTE[i % len(PALETTE)]
-            fig_dot.add_trace(go.Scatter(
-                x=[METRIC_LABELS[m] for m in METRICS],
-                y=[row[m] for m in METRICS],
-                mode="markers+lines",
-                name=f"{row['model']} / {row['condition']}",
-                marker=dict(symbol=sym, size=13, color=col,
-                            line=dict(color=col, width=2)),
-                line=dict(color=col, width=1, dash="dot"),
+            sub = summ_sorted[summ_sorted["condition"] == cond]
+            fig.add_trace(go.Bar(
+                name=cond, x=sub["model"], y=sub[f"{metric}_mean"],
+                error_y=dict(type="data", array=sub[f"{metric}_std"], visible=True),
+                marker_color=PALETTE[0] if cond == "master" else PALETTE[1],
             ))
-        fig_dot.update_layout(**PLOT_BASE, height=400,
-                              title="All Models — Metric Dot Chart",
-                              yaxis_range=[0, 1.05])
-        st.plotly_chart(fig_dot, use_container_width=True)
+        fig.update_layout(barmode="group")
+        _upd(fig, PLOT_BASE, title=f"{METRIC_LABELS[metric]} — Mean ± Std Across Folds, by Model & Condition",
+             height=420)
+        st.plotly_chart(fig, use_container_width=True)
 
-        # Delta table
-        st.markdown('<div class="section-label">Hypothesis Test — Master vs Crime-only</div>',
-                    unsafe_allow_html=True)
-        st.markdown(
-            '<p style="font-size:0.81rem;color:#566174;margin:-4px 0 12px;line-height:1.6;">'
-            'Each value = Master minus Crime-only. '
-            '<span style="color:#2dc653;font-weight:600;">Green = master improves</span>. '
-            '<span style="color:#ff4b4b;font-weight:600;">Red = crime-only higher after inversion correction</span> '
-            '— this does not mean crime-only is deployable; its predictions are structurally unstable '
-            'due to LabelEncoder ordering inconsistencies. Master models are stable every run.</p>',
-            unsafe_allow_html=True)
-        if "crime_only" in sel_conds and "master" in sel_conds:
-            base_  = results_df[results_df["condition"] == "crime_only"].set_index("model")
-            enrich = results_df[results_df["condition"] == "master"].set_index("model")
-            common = base_.index.intersection(enrich.index)
-            delta  = (enrich.loc[common, METRICS] - base_.loc[common, METRICS]).round(4)
-            delta.columns = [f"Δ {c}" for c in METRICS]
-            dcols = list(delta.columns)
-            st.dataframe(
-                delta.reset_index().style.map(
-                    lambda v: "color:#2dc653;font-weight:600" if isinstance(v, float) and v > 0
-                    else "color:#ff4b4b;font-weight:600" if isinstance(v, float) and v < 0
-                    else "",
-                    subset=dcols),
-                use_container_width=True)
-        else:
-            st.dataframe(fres[["model", "condition"] + METRICS].round(4),
-                         use_container_width=True)
+        st.markdown('<div class="section-label">Full Summary Table</div>', unsafe_allow_html=True)
+        st.dataframe(summ.sort_values("rmse_mean").reset_index(drop=True), use_container_width=True)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2 – ROC CURVES
-    # ══════════════════════════════════════════════════════════════════════════
+        direction_note = "lower is better" if metric in LOWER_IS_BETTER else "higher is better"
+        st.markdown(f'<p style="font-size:0.78rem;color:#566174;">{METRIC_LABELS[metric]}: {direction_note}.</p>',
+                   unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 2 — Per-fold detail
+    # ══════════════════════════════════════════════════════════════════════
     with tab2:
-        st.markdown('<p style="font-size:0.82rem;color:#566174;margin-bottom:12px;">'
-                    'Curve hugging top-left = best. AUC 1.0 = perfect; 0.5 = random. '
-                    'Solid = master; dotted = crime-only.</p>',
-                    unsafe_allow_html=True)
+        metric2 = st.selectbox("Metric", METRICS, format_func=lambda m: METRIC_LABELS[m], key="mp_metric2")
+        pf["series"] = pf["model"] + " / " + pf["condition"]
+        fig2 = px.line(pf.sort_values("fold"), x="fold", y=metric2, color="series", markers=True,
+                      color_discrete_sequence=PALETTE,
+                      title=f"{METRIC_LABELS[metric2]} by Walk-Forward Fold")
+        st.plotly_chart(_upd(fig2, PLOT_BASE, height=440), use_container_width=True)
 
-        fig_roc = go.Figure()
-        fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-                                     line=dict(color="#2a3347", dash="dot", width=1),
-                                     showlegend=False, hoverinfo="skip"))
-        auc_rows = []
-        for i, (_, row) in enumerate(fres.iterrows()):
-            # Each curve computed and cached independently
-            result = _cached_roc_curves(roc_json, row["model"], row["condition"])
-            if result is None:
-                continue
-            roc_auc = result["auc"]
-            dash = "dot" if row["condition"] == "crime_only" else "solid"
-            fig_roc.add_trace(go.Scatter(
-                x=result["fpr"], y=result["tpr"], mode="lines",
-                name=f"{row['model']} / {row['condition']}  (AUC={roc_auc:.3f})",
-                line=dict(color=PALETTE[i % len(PALETTE)], width=2, dash=dash),
-            ))
-            auc_rows.append({"Model": row["model"], "Condition": row["condition"],
-                             "AUC": round(roc_auc, 4)})
+        if {"val_start", "val_end", "train_rows", "val_rows"} <= set(pf.columns):
+            st.markdown('<div class="section-label">Fold Windows</div>', unsafe_allow_html=True)
+            windows = (pf[["fold", "val_start", "val_end", "train_rows", "val_rows"]]
+                      .drop_duplicates().sort_values("fold"))
+            st.dataframe(windows.reset_index(drop=True), use_container_width=True)
 
-        fig_roc.update_layout(**base_pb, height=480,
-                              title="ROC Curves — All Models & Conditions",
-                              xaxis=dict(title="False Positive Rate", **ax_style),
-                              yaxis=dict(title="True Positive Rate", **ax_style))
-        st.plotly_chart(fig_roc, use_container_width=True)
+        st.markdown('<div class="section-label">Per-Fold Results Table</div>', unsafe_allow_html=True)
+        st.dataframe(pf.sort_values(["model", "condition", "fold"]).reset_index(drop=True),
+                    use_container_width=True)
 
-        if auc_rows:
-            auc_df = pd.DataFrame(auc_rows)
-            fig_auc = px.bar(auc_df.sort_values("AUC", ascending=True),
-                             x="AUC", y="Model", color="Condition",
-                             orientation="h", barmode="group",
-                             color_discrete_sequence=PALETTE,
-                             title="AUC Scores — Model × Condition")
-            fig_auc.add_vline(x=0.5, line_color="#2a3347", line_dash="dot")
-            fig_auc.update_layout(**PLOT_BASE, xaxis_range=[0.4, 1.0], height=320)
-            st.plotly_chart(fig_auc, use_container_width=True)
-            st.dataframe(auc_df.sort_values("AUC", ascending=False),
-                         use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 – PR CURVES
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 3 — Significance tests
+    # ══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.markdown('<p style="font-size:0.82rem;color:#566174;margin-bottom:12px;">'
-                    '<span style="color:#e9c46a;">Precision</span>: of flagged clusters, '
-                    'how many are real hotspots? '
-                    '<span style="color:#4895ef;">Recall</span>: of real hotspots, how many caught? '
-                    'Solid = master; dotted = crime-only.</p>',
-                    unsafe_allow_html=True)
+        st.markdown('<p style="font-size:0.83rem;color:#566174;">Paired t-test on RMSE per model, '
+                    'comparing crime-only vs master across the same walk-forward fold windows. This is '
+                    'the actual test of the enrichment hypothesis — everything else on this page is '
+                    'descriptive.</p>', unsafe_allow_html=True)
 
-        fig_pr = go.Figure()
-        for i, (_, row) in enumerate(fres.iterrows()):
-            result = _cached_pr_curves(roc_json, row["model"], row["condition"])
-            if result is None:
-                continue
-            dash = "dot" if row["condition"] == "crime_only" else "solid"
-            fig_pr.add_trace(go.Scatter(
-                x=result["rec"], y=result["prec"], mode="lines",
-                name=f"{row['model']} / {row['condition']}  (AP={result['ap']:.3f})",
-                line=dict(color=PALETTE[i % len(PALETTE)], width=2, dash=dash),
-            ))
-        fig_pr.update_layout(**base_pb, height=480,
-                             title="Precision-Recall Curves — All Models & Conditions",
-                             xaxis=dict(title="Recall", **ax_style),
-                             yaxis=dict(title="Precision", **ax_style))
-        st.plotly_chart(fig_pr, use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 5 – FEATURE IMPORTANCE + CONFUSION MATRIX
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab4:
-        fa1, fa2 = st.columns(2)
-        shap_model = fa1.selectbox("Model",     sel_models, key="shap_m")
-        shap_cond  = fa2.selectbox("Condition", sel_conds,  key="shap_c")
-
-        model_row = fres[(fres["model"] == shap_model) &
-                         (fres["condition"] == shap_cond)]
-        if model_row.empty:
-            st.info("No results for this combination.")
+        if significance_df is None or significance_df.empty:
+            st.info("Upload experiment_significance_tests.xlsx in the sidebar to see this.")
         else:
-            skill = float(model_row["f1_weighted"].iloc[0])
+            sig = significance_df.copy()
+            sig_disp = sig[sig["model"].isin(sel_models)] if "model" in sig.columns else sig
 
-            features_crime  = ["Crime Count", "year",
-                               "crime_type_Contact crimes",
-                               "crime_type_Property crimes",
-                               "crime_type_Serious crimes",
-                               "crime_type_Drug-related crimes"]
-            features_master = features_crime + [
-                "population_density", "poor_households",
-                "population_unemployment", "population_education"]
-            features = features_master if shap_cond == "master" else features_crime
+            fig3 = go.Figure(go.Bar(
+                x=sig_disp["rmse_improvement"], y=sig_disp["model"], orientation="h",
+                marker_color=[("#2dc653" if v > 0 else "#ff4b4b") for v in sig_disp["rmse_improvement"]],
+                text=[f"p={p:.3f}" for p in sig_disp["p_value"]],
+                textposition="outside", textfont=dict(color="#566174", size=10),
+            ))
+            fig3.add_vline(x=0, line_color="#2a3347", line_width=1)
+            _upd(fig3, PLOT_BASE,
+                title="RMSE Improvement (crime-only − master) — Positive Means Enrichment Helped",
+                height=max(320, 60 * len(sig_disp)))
+            st.plotly_chart(fig3, use_container_width=True)
 
-            rng_fi = np.random.default_rng(hash(shap_model + shap_cond) % 2**32)
-            imp = np.abs(rng_fi.normal(0, 1, len(features))) * skill
-            if shap_cond == "master":
-                imp[-4:] *= 1.8
-            imp /= imp.sum()
-            fi_df = pd.DataFrame({"feature": features,
-                                  "importance": imp.round(4)}).sort_values("importance")
+            st.dataframe(sig_disp.reset_index(drop=True), use_container_width=True)
 
-            fi_col, cm_col = st.columns(2)
+            n_sig = int(sig_disp.get("significant_improvement_at_0.05", pd.Series(dtype=bool)).sum())
+            if n_sig > 0:
+                st.markdown(f"""
+                <div class="stat-card">
+                  <span class="badge-low">SIGNIFICANT</span>
+                  <span style="font-size:0.85rem;color:#8892a4;margin-left:10px;">
+                    {n_sig} of {len(sig_disp)} model(s) show a statistically significant RMSE
+                    improvement from enrichment (p &lt; 0.05).
+                  </span>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="stat-card">
+                  <span class="badge-medium">NOT SIGNIFICANT</span>
+                  <span style="font-size:0.85rem;color:#8892a4;margin-left:10px;">
+                    No model shows a statistically significant RMSE improvement from enrichment at
+                    p &lt; 0.05 across current folds — the enrichment hypothesis isn't supported yet
+                    by this evidence. Worth reporting honestly either way.
+                  </span>
+                </div>
+                """, unsafe_allow_html=True)
 
-            with fi_col:
-                st.markdown('<div class="section-label">Feature Importance</div>',
-                            unsafe_allow_html=True)
-                fig_fi = go.Figure(go.Bar(
-                    x=fi_df["importance"], y=fi_df["feature"], orientation="h",
-                    marker=dict(
-                        color=fi_df["importance"].tolist(),
-                        colorscale=[[0, "#1a2235"], [0.4, "#4895ef"], [1, "#e9c46a"]],
-                        showscale=False,
-                    ),
-                    text=fi_df["importance"].apply(lambda v: f"{v:.3f}"),
-                    textposition="outside", textfont=dict(color="#566174", size=10),
-                ))
-                fig_fi.update_layout(**base_pb, height=380,
-                                     title=f"Importance — {shap_model}/{shap_cond}",
-                                     xaxis=dict(title="Relative Importance", **ax_style),
-                                     yaxis=dict(**ax_style))
-                st.plotly_chart(fig_fi, use_container_width=True)
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 4 — Leaderboard
+    # ══════════════════════════════════════════════════════════════════════
+    with tab4:
+        board = summ.sort_values("rmse_mean").reset_index(drop=True)
+        board.index = board.index + 1
+        st.markdown('<div class="section-label">Ranked by RMSE (lower is better)</div>', unsafe_allow_html=True)
+        st.dataframe(board[["model", "condition", "rmse_mean", "mae_mean", "r2_mean", "smape_mean"]],
+                    use_container_width=True)
 
-            with cm_col:
-                st.markdown('<div class="section-label">Confusion Matrix</div>',
-                            unsafe_allow_html=True)
-                # Use real cluster names from uploaded data
-                src_for_cm = master_df if shap_cond == "master" else crime_only_df
-                if src_for_cm is not None and "Cluster" in src_for_cm.columns:
-                    CLUSTERS_CM = sorted(src_for_cm["Cluster"].unique().tolist())
-                elif master_df is not None:
-                    CLUSTERS_CM = sorted(master_df["Cluster"].unique().tolist())
-                else:
-                    CLUSTERS_CM = ["No data — upload dataset"]
-                    st.warning("Upload dataset to see cluster names.")
-
-                n_cl = len(CLUSTERS_CM)
-                rng_cm = np.random.default_rng(
-                    hash(shap_model + shap_cond + "cm") % 2**32)
-                n_test = max(n_cl * 25, 200)
-                y_true = rng_cm.integers(0, n_cl, n_test)
-                y_pred = np.where(rng_cm.random(n_test) < skill,
-                                  y_true,
-                                  rng_cm.integers(0, n_cl, n_test))
-                cm_mat = confusion_matrix(y_true, y_pred, labels=list(range(n_cl)))
-                pct    = (cm_mat.astype(float)
-                          / cm_mat.sum(axis=1, keepdims=True).clip(min=1) * 100)
-                text_cm = [[f"{cm_mat[i,j]}<br>({pct[i,j]:.0f}%)"
-                            for j in range(n_cl)] for i in range(n_cl)]
-
-                fig_cm = go.Figure(go.Heatmap(
-                    z=pct, x=CLUSTERS_CM, y=CLUSTERS_CM,
-                    text=text_cm, texttemplate="%{text}",
-                    colorscale="YlOrBr", showscale=False,
-                    hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>"
-                                  "%{text}<extra></extra>",
-                ))
-                fig_cm.update_layout(
-                    **base_pb, height=380,
-                    title=f"Confusion Matrix — {shap_model}/{shap_cond}",
-                    xaxis=dict(title="Predicted", tickangle=-40,
-                               tickfont=dict(color="#566174", size=8),
-                               gridcolor="#1a2235", linecolor="#1a2235"),
-                    yaxis=dict(title="Actual",
-                               tickfont=dict(color="#566174", size=8),
-                               gridcolor="#1a2235", linecolor="#1a2235"))
-                st.plotly_chart(fig_cm, use_container_width=True)
-
-            # Condition comparison
-            st.markdown('<div class="section-label">Feature Importance — Crime-only vs Master</div>',
-                        unsafe_allow_html=True)
-            both_rows = []
-            for c in CONDITIONS:
-                mr = fres[(fres["model"] == shap_model) & (fres["condition"] == c)]
-                if mr.empty:
-                    continue
-                feats = features_master if c == "master" else features_crime
-                sk2   = float(mr["f1_weighted"].iloc[0])
-                rng3  = np.random.default_rng(hash(shap_model + c + "fi") % 2**32)
-                imp2  = np.abs(rng3.normal(0, 1, len(feats))) * sk2
-                if c == "master":
-                    imp2[-4:] *= 1.8
-                imp2 /= imp2.sum()
-                for f, v in zip(feats, imp2):
-                    both_rows.append({"condition": c, "feature": f,
-                                      "importance": round(v, 4)})
-            if both_rows:
-                fig_comp = px.bar(
-                    pd.DataFrame(both_rows).sort_values("importance", ascending=False),
-                    x="feature", y="importance", color="condition",
-                    barmode="group", color_discrete_sequence=["#4895ef", "#e9c46a"],
-                    title=f"{shap_model} — Crime-only vs Master Feature Importance")
-                fig_comp.update_layout(**PLOT_BASE, xaxis_tickangle=-30, height=360)
-                st.plotly_chart(fig_comp, use_container_width=True)
+        fig4 = px.scatter(summ, x="rmse_mean", y="r2_mean", color="model", symbol="condition",
+                          size="mae_mean", color_discrete_sequence=PALETTE,
+                          title="RMSE vs R² — Bottom-Right is Better",
+                          hover_data=["mae_mean", "smape_mean"])
+        st.plotly_chart(_upd(fig4, PLOT_BASE, height=460), use_container_width=True)

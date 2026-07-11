@@ -179,3 +179,53 @@ def build_input_row(feature_cols: list, cluster: str, crime_type: str, values: d
         elif c in values:
             row[c] = values[c]
     return pd.DataFrame([row], columns=feature_cols)
+
+
+# ---------------------------------------------------------------------------
+# Column-order alignment
+# ---------------------------------------------------------------------------
+#
+# Tree libraries (CatBoost especially) validate the input DataFrame's column
+# ORDER against what was recorded at training time and raise a hard error on
+# any mismatch — e.g. "At position 0 should be feature with name year (found
+# population_density)". get_dummies' column ordering isn't guaranteed
+# stable across pandas versions, and the trained models went through an
+# Excel round-trip (Kedro's ExcelDataset) between feature engineering and
+# training, so the in-app engineered matrix's column order is not something
+# to rely on positionally. Reindexing to the model's own recorded feature
+# names — not the order our own engineering happened to produce — is what
+# actually fixes this, for every model type, not just CatBoost.
+def align_features_to_model(X: pd.DataFrame, model) -> pd.DataFrame:
+    feature_names = None
+    for attr in ("feature_names_", "feature_names_in_"):
+        if hasattr(model, attr):
+            names = getattr(model, attr)
+            if names is not None:
+                feature_names = list(names)
+                break
+    if feature_names is None and hasattr(model, "get_booster"):
+        try:
+            feature_names = model.get_booster().feature_names
+        except Exception:
+            feature_names = None
+    if feature_names is None and hasattr(model, "booster_"):
+        try:
+            feature_names = list(model.booster_.feature_name())
+        except Exception:
+            feature_names = None
+
+    if not feature_names:
+        # Model doesn't expose its training-time feature names (very old
+        # library version) — nothing to align to, pass through as-is.
+        return X
+
+    missing = [f for f in feature_names if f not in X.columns]
+    if missing:
+        preview = ", ".join(missing[:10]) + (", ..." if len(missing) > 10 else "")
+        raise ValueError(
+            f"This model was trained on {len(feature_names)} features, but the uploaded/engineered "
+            f"data is missing {len(missing)} of them: {preview}. This usually means the uploaded raw "
+            f"dataset's schema (or the lag/rolling parameters) doesn't match what the model was "
+            f"actually trained on."
+        )
+    return X[feature_names]

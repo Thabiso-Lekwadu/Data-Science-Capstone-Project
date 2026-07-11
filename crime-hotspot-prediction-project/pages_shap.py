@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from model_utils import feature_columns, models_for_condition
+from model_utils import feature_columns, models_for_condition, align_features_to_model
 
 try:
     import shap
@@ -105,6 +105,12 @@ def render(master_feat: pd.DataFrame, crime_feat: pd.DataFrame, uploaded_models:
     X_sample = _sample_rows(features_json, sample_n)
 
     model = models[model_name]
+
+    try:
+        X_sample = align_features_to_model(X_sample, model)
+    except ValueError as e:
+        st.error(str(e))
+        return
 
     with st.spinner(f"Computing SHAP values for {model_name}..."):
         try:

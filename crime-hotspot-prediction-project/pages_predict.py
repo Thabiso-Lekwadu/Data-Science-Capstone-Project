@@ -18,7 +18,7 @@ import streamlit as st
 
 from model_utils import (
     feature_columns, cluster_and_crime_type_columns, build_input_row,
-    models_for_condition, DATE_COL,
+    models_for_condition, DATE_COL, align_features_to_model,
 )
 
 SOCIO_LABELS = {
@@ -127,7 +127,8 @@ def render(master_feat: pd.DataFrame, uploaded_models: dict, PALETTE: list, PLOT
         preds, errors = {}, {}
         for name, model in models.items():
             try:
-                preds[name] = float(model.predict(X_row)[0])
+                X_aligned = align_features_to_model(X_row, model)
+                preds[name] = float(model.predict(X_aligned)[0])
             except Exception as e:
                 errors[name] = str(e)
 

@@ -1,0 +1,19 @@
+# Never send these into the build context / image for the pipeline container.
+data/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+logs/
+notebooks/
+*.ipynb
+.viz/
+cache/
+conf/local/
+.env
+*.log
+.pytest_cache/
+.mypy_cache/
+tests/

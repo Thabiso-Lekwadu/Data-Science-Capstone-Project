@@ -19,4 +19,4 @@ rolling_windows: [3, 5]
 # NOTE: with annual data you need at least n_splits + 1 distinct years of
 # history after the lag warm-up rows are dropped — if this errors with
 # "not enough distinct periods", lower n_splits.
-n_splits: 4
+n_splits: 2

@@ -2,13 +2,17 @@
 Crime Hotspot Prediction – Intelligence Dashboard
 Run: streamlit run App.py --server.port 8503
 
-STRICTLY upload-driven: nothing on any page renders until the relevant
-file(s) have been uploaded in this sidebar. There is no fallback to a local
-data/ folder or any other default — closing/reopening the browser or
-restarting the app clears everything back to empty, and pages only ever
-reflect what's actually been uploaded in the current session.
+Upload-driven by default: nothing renders until the relevant file(s) have
+been uploaded in the sidebar. Set the environment variable
+AUTO_LOAD_FROM_DISK=true (as the Docker Compose `app` service does) to make
+the app instead auto-load whatever the `pipeline` container already wrote to
+the shared data volume — uploads still work and always take priority over
+the auto-loaded version if both are present. Outside that opt-in, behaviour
+is unchanged from before: strictly upload-only, no disk fallback.
 """
 from __future__ import annotations
+import os
+import pickle
 import sys
 from pathlib import Path
 
@@ -17,6 +21,9 @@ if str(_APP_DIR) not in sys.path:
     sys.path.insert(0, str(_APP_DIR))
 
 import streamlit as st
+
+AUTO_LOAD = os.environ.get("AUTO_LOAD_FROM_DISK", "false").strip().lower() in ("1", "true", "yes")
+APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "data"))
 
 st.set_page_config(
     page_title="Crime Hotspot Intelligence | SAPS",
@@ -71,7 +78,7 @@ div[data-testid="stFileUploader"] label p { color: #566174 !important; font-size
 import pandas as pd
 
 from model_utils import (
-    MODEL_NAMES, CONDITIONS, engineer_features, required_raw_columns_present,
+    MODEL_NAMES, CONDITIONS, MODEL_FILE_PATTERN, engineer_features, required_raw_columns_present,
     load_uploaded_models, models_for_condition,
 )
 
@@ -105,12 +112,21 @@ with st.sidebar:
     ])
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">Data Sources — Upload Only</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<p style="font-size:0.72rem;color:#566174;line-height:1.5;margin-bottom:10px;">'
-        'Nothing renders until you upload it here. There is no local-disk fallback — '
-        'restart the app or clear an upload and the corresponding charts disappear.</p>',
-        unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Data Sources</div>', unsafe_allow_html=True)
+    if AUTO_LOAD:
+        st.markdown(
+            f'<p style="font-size:0.72rem;color:#566174;line-height:1.5;margin-bottom:6px;">'
+            f'<span style="color:#2dc653;">●</span> Auto-load from volume: '
+            f'<b>ON</b> — reading whatever the pipeline container already wrote to '
+            f'<code>{APP_DATA_DIR}</code>. Uploading a file here overrides the auto-loaded '
+            f'version for this session only.</p>', unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<p style="font-size:0.72rem;color:#566174;line-height:1.5;margin-bottom:6px;">'
+            '<span style="color:#566174;">●</span> Auto-load from volume: <b>OFF</b> — '
+            'nothing renders until you upload it here. (Runs this way unless '
+            '<code>AUTO_LOAD_FROM_DISK=true</code> is set, as in the Docker Compose app service.)</p>',
+            unsafe_allow_html=True)
 
     up_master = st.file_uploader(
         "① Master dataset (crime + socioeconomic)", type=["xlsx", "csv"],
@@ -153,7 +169,9 @@ with st.sidebar:
     st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#2a3347;padding-bottom:8px;">v3.0 — Capstone Project (upload-only)</div>', unsafe_allow_html=True)
 
 
-# ── Data loading — upload only, nothing else ────────────────────────────────
+# ── Data loading ─────────────────────────────────────────────────────────────
+# Upload always wins. Disk is only ever consulted when AUTO_LOAD is on, and
+# even then, only as a fallback for whichever specific file wasn't uploaded.
 @st.cache_data(show_spinner=False)
 def _load_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
     import io
@@ -161,22 +179,49 @@ def _load_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return pd.read_csv(buf) if filename.endswith(".csv") else pd.read_excel(buf, engine="openpyxl")
 
 
-def _resolve_upload(uploaded, label: str):
-    """Returns (dataframe_or_None, has_data_bool). No disk fallback of any kind."""
-    if uploaded is None:
-        return None, False
+@st.cache_data(show_spinner=False)
+def _load_disk_path(path_str: str, mtime: float, size: int):
+    p = Path(path_str)
     try:
-        return _load_file(uploaded.getvalue(), uploaded.name), True
-    except Exception as e:
-        st.sidebar.error(f"Could not read {label}: {e}")
-        return None, False
+        return pd.read_excel(p, engine="openpyxl") if path_str.endswith("xlsx") else pd.read_csv(p)
+    except Exception:
+        return None
 
 
-master_df,     has_master = _resolve_upload(up_master,     "master dataset")
-crime_only_df, has_crime  = _resolve_upload(up_crime_only,  "crime-only dataset")
-per_fold_df,   has_pf     = _resolve_upload(up_per_fold,    "per-fold results")
-summary_df,    has_summ   = _resolve_upload(up_summary,     "CV summary")
-sig_df,        has_sig    = _resolve_upload(up_sig,         "significance tests")
+def _resolve(uploaded, disk_path: Path, label: str):
+    """Returns (dataframe_or_None, source_description_str)."""
+    if uploaded is not None:
+        try:
+            return _load_file(uploaded.getvalue(), uploaded.name), f"uploaded: {uploaded.name}"
+        except Exception as e:
+            st.sidebar.error(f"Could not read {label}: {e}")
+            return None, "upload failed"
+    if AUTO_LOAD:
+        p = Path(disk_path)
+        if p.exists():
+            stat = p.stat()
+            df = _load_disk_path(str(p), stat.st_mtime, stat.st_size)
+            if df is not None:
+                return df, f"auto-loaded from volume: {disk_path}"
+        return None, "not found in volume"
+    return None, "not uploaded"
+
+
+# Fixed paths matching the Kedro catalog — only ever read when AUTO_LOAD=true.
+_DISK_PATHS = {
+    "master":   APP_DATA_DIR / "03_primary/master_dataset.xlsx",
+    "crime":    APP_DATA_DIR / "02_intermediate/crime_processed.xlsx",
+    "per_fold": APP_DATA_DIR / "08_reporting/experiment_results_per_fold.xlsx",
+    "summary":  APP_DATA_DIR / "08_reporting/experiment_results_summary.xlsx",
+    "sig":      APP_DATA_DIR / "08_reporting/experiment_significance_tests.xlsx",
+}
+_DISK_MODELS_DIR = APP_DATA_DIR / "06_models"
+
+master_df,     src_master  = _resolve(up_master,     _DISK_PATHS["master"],   "master dataset")
+crime_only_df, src_crime   = _resolve(up_crime_only,  _DISK_PATHS["crime"],   "crime-only dataset")
+per_fold_df,   src_pf      = _resolve(up_per_fold,    _DISK_PATHS["per_fold"], "per-fold results")
+summary_df,    src_summ    = _resolve(up_summary,     _DISK_PATHS["summary"], "CV summary")
+sig_df,        src_sig     = _resolve(up_sig,         _DISK_PATHS["sig"],     "significance tests")
 
 # Uploaded models — matched to (model_name, condition) by filename pattern
 uploaded_models, unmatched_model_files = load_uploaded_models(up_models)
@@ -185,18 +230,49 @@ if unmatched_model_files:
         f"{len(unmatched_model_files)} uploaded file(s) didn't match an expected model filename "
         f"and were skipped: {', '.join(unmatched_model_files)}")
 
+
+@st.cache_resource(show_spinner=False)
+def _load_model_from_disk(path_str: str):
+    with open(path_str, "rb") as f:
+        return pickle.load(f)
+
+
+def _auto_load_models_from_disk() -> dict:
+    """Only runs when AUTO_LOAD is on. Scans data/06_models/*.pkl in the
+    shared volume and matches filenames the same way load_uploaded_models
+    does for uploads."""
+    if not AUTO_LOAD or not _DISK_MODELS_DIR.exists():
+        return {}
+    reverse_lookup = {v.lower(): k for k, v in MODEL_FILE_PATTERN.items()}
+    models = {}
+    for p in sorted(_DISK_MODELS_DIR.glob("*.pkl")):
+        key = reverse_lookup.get(p.name.lower())
+        if key is None:
+            continue
+        try:
+            models[key] = _load_model_from_disk(str(p))
+        except Exception as e:
+            st.sidebar.warning(f"Could not load {p.name} from volume: {e}")
+    return models
+
+
+# Uploads override the auto-loaded volume models on key collision.
+disk_models = _auto_load_models_from_disk()
+all_models = {**disk_models, **uploaded_models}
+n_disk_models = len(disk_models)
+
 # On-the-fly feature engineering, derived from the raw uploads — this is what
 # replaces the old separate "master_dataset_features.xlsx" upload. Computed
-# lazily (only if the corresponding raw dataset was uploaded), cached by the
+# lazily (only if the corresponding raw dataset is available), cached by the
 # raw data's own content.
 master_feat, crime_feat = None, None
-if has_master:
+if master_df is not None:
     err = required_raw_columns_present(master_df)
     if err:
         st.sidebar.error(f"Master dataset: {err}")
     else:
         master_feat = engineer_features(master_df.to_json())
-if has_crime:
+if crime_only_df is not None:
     err = required_raw_columns_present(crime_only_df)
     if err:
         st.sidebar.error(f"Crime-only dataset: {err}")
@@ -205,39 +281,41 @@ if has_crime:
 
 # Visible, page-agnostic proof of what's actually driving the charts right now.
 _SOURCE_ROWS = [
-    ("① master_dataset (raw)",        master_df,      has_master),
-    ("② crime_processed (raw)",       crime_only_df,  has_crime),
-    ("   → engineered (master)",      master_feat,    master_feat is not None),
-    ("   → engineered (crime_only)",  crime_feat,      crime_feat is not None),
-    ("③ trained models",              None,            len(uploaded_models) > 0),
-    ("④ experiment_results_per_fold", per_fold_df,     has_pf),
-    ("⑤ experiment_results_summary",  summary_df,      has_summ),
-    ("⑥ experiment_significance_tests", sig_df,        has_sig),
+    ("① master_dataset (raw)",        master_df,      src_master),
+    ("② crime_processed (raw)",       crime_only_df,  src_crime),
+    ("   → engineered (master)",      master_feat,    "derived in-app" if master_feat is not None else "not available"),
+    ("   → engineered (crime_only)",  crime_feat,      "derived in-app" if crime_feat is not None else "not available"),
+    ("③ trained models",              None,           f"{len(uploaded_models)} uploaded"
+                                                        + (f", {n_disk_models} auto-loaded from volume" if AUTO_LOAD else "")),
+    ("④ experiment_results_per_fold", per_fold_df,     src_pf),
+    ("⑤ experiment_results_summary",  summary_df,      src_summ),
+    ("⑥ experiment_significance_tests", sig_df,        src_sig),
 ]
-with st.expander("📡  Active data sources — nothing below exists until it's uploaded", expanded=False):
-    for _name, _df, _present in _SOURCE_ROWS:
+with st.expander("📡  Active data sources (click to verify what's rendering below)", expanded=False):
+    for _name, _df, _detail in _SOURCE_ROWS:
+        _present = (_df is not None) or (_name.startswith("③") and len(all_models) > 0)
         _icon = "🟢" if _present else "⚪"
-        if _name.startswith("③"):
-            _detail = f"{len(uploaded_models)} model file(s) matched" if _present else "not uploaded"
-        else:
-            _detail = f"{len(_df):,} rows" if (_df is not None) else "not uploaded"
+        _rows = f" ({len(_df):,} rows)" if _df is not None else ""
         st.markdown(f'<span style="font-family:\'DM Mono\',monospace;font-size:0.78rem;">'
-                    f'{_icon} <b>{_name}</b> — {_detail}</span>', unsafe_allow_html=True)
+                    f'{_icon} <b>{_name}</b> — {_detail}{_rows}</span>', unsafe_allow_html=True)
 
 
-# ── Upload gate ───────────────────────────────────────────────────────────────
+# ── Gate ──────────────────────────────────────────────────────────────────────
 def _gate(ready: bool, needed: str) -> bool:
     if not ready:
+        _hint = ("The pipeline container may not have finished writing to the shared volume yet — "
+                 "check its logs, or upload the file(s) below to override.") if AUTO_LOAD else \
+                "Nothing is loaded from disk automatically in this mode."
         st.markdown(f"""
         <div style="background:#0c1220;border:1px solid #1a2235;border-radius:10px;
                     padding:3rem 2rem;text-align:center;margin-top:3rem;">
           <div style="font-family:'DM Mono',monospace;font-size:0.62rem;letter-spacing:0.14em;
-                      color:#566174;text-transform:uppercase;margin-bottom:10px;">No Data Uploaded</div>
+                      color:#566174;text-transform:uppercase;margin-bottom:10px;">No Data Available</div>
           <div style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;
                       color:#e2e8f0;margin-bottom:8px;">Upload required to continue</div>
           <div style="font-size:0.83rem;color:#566174;line-height:1.7;">
-            Upload <span style="font-family:'DM Mono',monospace;color:#e9c46a;">{needed}</span>
-            via the sidebar to view this page. Nothing is loaded from disk automatically.
+            Need <span style="font-family:'DM Mono',monospace;color:#e9c46a;">{needed}</span>
+            via the sidebar to view this page. {_hint}
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -256,7 +334,7 @@ elif page == "SHAP Feature Importance":
     if _gate(master_feat is not None or crime_feat is not None,
              "① master dataset (or ② crime-only dataset) — features are engineered automatically"):
         from pages_shap import render
-        render(master_feat, crime_feat, uploaded_models, PALETTE, PLOT_BASE, MODEL_NAMES, CONDITIONS)
+        render(master_feat, crime_feat, all_models, PALETTE, PLOT_BASE, MODEL_NAMES, CONDITIONS)
 
 elif page == "Model Performance":
     if _gate(per_fold_df is not None and summary_df is not None,
@@ -268,4 +346,4 @@ else:  # Prediction Explorer
     if _gate(master_feat is not None,
              "① master dataset — features are engineered automatically"):
         from pages_predict import render
-        render(master_feat, uploaded_models, PALETTE, PLOT_BASE)
+        render(master_feat, all_models, PALETTE, PLOT_BASE)

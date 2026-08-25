@@ -41,6 +41,18 @@ MODELS_DIR = Path("data/06_models")
 # ---------------------------------------------------------------------------
 
 def _save_model(model, name: str) -> None:
+    """Pickle the fitted model as-is (NOT wrapped) so shap.TreeExplainer in
+    the dashboard's Feature Importance page still recognises it as a native
+    XGBoost/LightGBM/CatBoost/RandomForest object -- TreeExplainer does
+    isinstance-style checks that a generic Python wrapper would fail.
+
+    Because of that, the non-negative fix below (`y_pred = np.maximum(...)`)
+    is applied inside `_run_walk_forward_cv` for the reported metrics, but
+    it does NOT travel with the pickled artifact. Whatever code calls
+    `model.predict(...)` on these .pkl files in the Streamlit Predictions
+    Explorer needs the same one-line clip applied to its own output -- see
+    the note in the chat reply for exactly where that call needs to change.
+    """
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     path = MODELS_DIR / f"{name}.pkl"
     with open(path, "wb") as f:
@@ -138,6 +150,21 @@ def _run_walk_forward_cv(
         model = model_builder()
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
+
+        # Crime Count can never be negative. Random Forest can't produce
+        # negative predictions (each tree's leaf output is an average of
+        # non-negative training targets, so the forest average stays >= 0),
+        # but XGBoost/LightGBM/CatBoost are additive boosting models: each
+        # boosting round adds a *signed* correction on top of the running
+        # prediction, and that sum is not constrained to stay within the
+        # training target's range. In walk-forward CV this shows up worst
+        # in later folds, where lag/rolling features have drifted outside
+        # the range the trees were split on and the boosted sum overshoots
+        # below zero. Clip at the model's own output stage (not just before
+        # scoring) so every downstream consumer -- these metrics, the saved
+        # .pkl, and the Streamlit Predictions Explorer -- sees a physically
+        # valid, non-negative crime count.
+        y_pred = np.maximum(y_pred, 0.0)
 
         metrics = _regression_metrics(y_val, y_pred)
         metrics.update({

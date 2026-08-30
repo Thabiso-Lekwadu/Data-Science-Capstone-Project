@@ -1,49 +1,107 @@
-This project aims to use the regional data from EasyData to create a Machine Learning model that can predict the crime hotspots
-in South Africa per region (Province, and Cluster/ Town).
-Exploration into the data will be done to find out which towns require intervention to fend off the crime.
-Multiple datasets will be explored to also find out the socio-economic factors that contribute to crime in those towns. This will include
-exploration into the unemployment rate, poverty levels, and education levels in those towns. The data will be visualized to find out the trends and patterns in the crime data.
-Features contributing to the crime hotspots will be identified from the multiple sources and consolidated into
-one dataset that will be used to train the Classification Machine Learning model.
-- We will see the Top 5 high crime spots,
-- at which time of the year does crime peak in those areas,
-- which type of crime is most prevalent in those areas,
-- and which socio-economic factors contribute to the crime in those areas.
-The consolidated dataset will include the target feature (Town/ Cluster) and the features that contribute to the crime in those areas.
-- Population density
-- Unemployment rate
-- Poverty levels
-- Education levels
+# Crime Hotspot Prediction — Limpopo (SAPS × Quantec)
 
-Plan:
-1. Data Collection: Collect the crime data and socio-economic data for the regions in South Africa from EasyData and other sources.
-2. Data Cleaning and Preprocessing: Clean the data by removing unnecessary rows and columns, handling missing values, fixing the table structure (Unpivoting),
-   encoding categorical variables, and normalizing numerical features.
-3. Exploratory Data Analysis: Visualize the data to identify trends and patterns in crime rates and socio-economic factors.
-4. Feature Selection: Identify the most relevant features that contribute to crime hotspots.
-5. Model Training: Train a Classification Machine Learning model using the consolidated dataset to predict crime hotspots.
-6. Model Evaluation: Evaluate the model's performance using appropriate metrics such as accuracy, precision, recall, and F1-score.
-7. Interpretation and Insights: Interpret the model's predictions and provide insights into the factors contributing to crime hotspots in South Africa.
-8. Conclusion: Summarize the findings and suggest potential interventions to reduce crime in the identified hotspots.
+An end-to-end data-engineering + machine-learning capstone that predicts
+**Crime Count** per police cluster and crime type in Limpopo, South Africa,
+and tests whether adding **socioeconomic context** (population density, poor
+households, unemployment, education) improves those predictions.
 
-Methodology:
-1. Data Collection: Use APIs
-2. Define an ETL pipeline to clean and preprocess the data (Data Lakehouse)
-3. Use data visualization libraries such as Matplotlib and Seaborn to explore the data and get Ad Hoc reports.
-4. Load transformed data to PowerBi for standard report.
-5. Design a FastAPI to serve the model predictions.
-6. Deploy the model and API to Azure for scalability and accessibility.
-7. Use Docker to containerize the application for easy deployment and management.
+> The original project brief (which framed this as *classifying* the cluster)
+> is kept for provenance at [`docs/original-project-brief.md`](docs/original-project-brief.md).
+> The project was reframed to **regression on Crime Count** — see below.
 
-Tech Stack:
-- Data Collection: Python, APIs
-- Data Cleaning and Preprocessing: Python, Pandas, NumPy
-- Exploratory Data Analysis: Python, Matplotlib, Seaborn
-- Feature Selection: Python, Scikit-learn
-- Model Training: Python, Scikit-learn
-- Model Evaluation: Python, Scikit-learn
-- Interpretation and Insights: Python, Jupyter Notebook
-- Conclusion: Python, Jupyter Notebook
-- Data Visualization: Power BI
-- API Development: FastAPI
-- Deployment: Azure, Docker
+The project has two deployables that run together via Docker Compose:
+
+| Component | Path | What it does |
+|-----------|------|--------------|
+| **Kedro pipeline** | [`crime-hotspot-prediction-project/`](crime-hotspot-prediction-project/) | Ingests → cleans → feature-engineers → trains & evaluates 4 tree-ensemble models under 2 conditions, with walk-forward CV and a paired significance test. |
+| **Streamlit app** | [`app/`](app/) | Interactive dashboard: EDA, SHAP feature importance, model performance, and a prediction explorer. Reads the artifacts the pipeline produces. |
+
+## What the model actually does
+
+- **Task:** regression — predict `Crime Count` for a `(Cluster, Type of Crime, year)`.
+- **Models:** Random Forest, XGBoost, LightGBM, CatBoost (all tree ensembles,
+  so no scaling / log / PCA is needed).
+- **Two conditions:** `crime_only` (baseline) vs `master` (crime + socioeconomic).
+- **Validation:** expanding-window **walk-forward** cross-validation (respects
+  time order), with a **paired t-test** per model asking whether the enriched
+  condition gives a significantly lower RMSE across the same folds.
+
+## Quick start — Docker (recommended)
+
+```bash
+docker compose up --build
+```
+
+1. The **pipeline** service runs the offline Kedro pipeline
+   (`training_from_raw`) from the raw Excel files baked into its image,
+   writing processed data, engineered features, trained `.pkl` models and
+   reporting tables into a shared volume, then exits.
+2. The **app** service waits for the pipeline to finish, then serves the
+   dashboard, auto-loading those artifacts from the same volume.
+
+Open **http://localhost:8501**.
+
+To regenerate everything from scratch:
+
+```bash
+docker compose down -v && docker compose up --build
+```
+
+## Running locally (without Docker)
+
+Pipeline:
+
+```bash
+cd crime-hotspot-prediction-project
+pip install -r requirements.txt
+pip install -e . --no-deps
+kedro run --pipeline training_from_raw     # offline, from data/01_raw
+# or `kedro run` for the full pipeline incl. the live Quantec API pull
+```
+
+App (after the pipeline has produced artifacts):
+
+```bash
+cd app
+pip install -r requirements.txt
+# point the app at the pipeline's data dir and let it auto-load:
+AUTO_LOAD_FROM_DISK=true \
+APP_DATA_DIR=../crime-hotspot-prediction-project/data \
+streamlit run App.py
+```
+
+Without `AUTO_LOAD_FROM_DISK`, the app is strictly upload-driven — use the
+sidebar to upload the datasets, models and reporting files.
+
+## Live data ingestion (optional)
+
+The `data_ingestion` pipeline pulls from the Quantec EasyData API and needs
+credentials. Copy `crime-hotspot-prediction-project/.env.example` to `.env`
+and fill in `QUANTEC_API_KEY`. The default `docker compose up` does **not**
+need this — it runs the offline path from the raw Excel already in
+`data/01_raw`.
+
+## Repository layout
+
+```
+.
+├─ app/                              # Streamlit dashboard (standalone deployable)
+│  ├─ App.py                         # entrypoint + routing
+│  ├─ feature_engineering.py         # single app-side FE source of truth
+│  ├─ model_utils.py                 # model loading, schema alignment, cached FE
+│  ├─ views/                         # one module per page (eda, model, predict, shap)
+│  ├─ requirements.txt
+│  └─ Dockerfile
+├─ crime-hotspot-prediction-project/ # Kedro pipeline project
+│  ├─ src/…/pipelines/               # data_ingestion, data_preprocessing,
+│  │                                 #   feature_engineering, model_training
+│  ├─ conf/                          # catalog, parameters, credentials template
+│  ├─ data/                          # Kedro data layers (01_raw kept; rest derived)
+│  ├─ tests/
+│  ├─ requirements.txt
+│  ├─ Dockerfile + docker-entrypoint.sh
+│  └─ .env.example
+├─ docs/                             # proposal, workflow docs, articles, PLAN
+├─ docker-compose.yml
+└─ README.md
+```

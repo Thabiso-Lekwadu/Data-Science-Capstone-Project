@@ -1,0 +1,51 @@
+# =============================================================================
+# Crime Hotspot Prediction — full stack.
+#
+#   docker compose up --build
+#
+# What happens:
+#   1. `pipeline` builds the Kedro image, runs the offline pipeline
+#      (preprocessing -> feature engineering -> model training + reporting)
+#      from the baked raw Excel files, and writes every artifact
+#      (processed data, engineered features, trained .pkl models, reporting
+#      tables) into the shared `pipeline_data` volume, then exits 0.
+#   2. `app` waits for the pipeline to finish successfully, then starts the
+#      Streamlit dashboard, which auto-loads those artifacts from the same
+#      volume (AUTO_LOAD_FROM_DISK=true) and serves them on http://localhost:8501
+#
+# To force a clean re-run (regenerate everything from scratch):
+#   docker compose down -v && docker compose up --build
+# =============================================================================
+services:
+  pipeline:
+    build:
+      context: ./crime-hotspot-prediction-project
+    image: crime-hotspot-pipeline
+    container_name: crime-hotspot-pipeline
+    volumes:
+      - pipeline_data:/app/data          # read-write: the pipeline WRITES here
+    # Uncomment to run the LIVE Quantec ingestion instead of the offline path
+    # (requires a .env with QUANTEC_API_KEY — see crime-hotspot-prediction-project/.env.example):
+    # env_file:
+    #   - ./crime-hotspot-prediction-project/.env
+    restart: "no"                        # one-shot: run the pipeline, then stop
+
+  app:
+    build:
+      context: ./app
+    image: crime-hotspot-app
+    container_name: crime-hotspot-app
+    depends_on:
+      pipeline:
+        condition: service_completed_successfully   # wait until the pipeline is done
+    environment:
+      AUTO_LOAD_FROM_DISK: "true"
+      APP_DATA_DIR: /app/data
+    ports:
+      - "8501:8501"
+    volumes:
+      - pipeline_data:/app/data:ro       # read-only: the app only READS artifacts
+    restart: unless-stopped
+
+volumes:
+  pipeline_data:

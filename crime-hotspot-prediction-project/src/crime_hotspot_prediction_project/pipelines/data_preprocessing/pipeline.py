@@ -15,7 +15,10 @@ def create_pipeline(**kwargs):
     return pipeline([
         node(
             func=preprocess_crime_data,
-            inputs=["crime_df1", "crime_df2", "crime_df3"],
+            inputs=[
+                "crime_df1", "crime_df2", "crime_df3",
+                "params:excluded_crime_types",
+            ],
             outputs="crime_processed",
             name="preprocess_crime_data_node",
         ),

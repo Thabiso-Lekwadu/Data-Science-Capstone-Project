@@ -12,13 +12,27 @@ fewer distinct periods than crime_processed -- and the *same* boundaries are
 reused for the crime_only condition. This is what makes the paired
 significance test in `run_paired_significance_tests` valid: both conditions
 are evaluated on identical validation windows.
+
+Persistence: each train node RETURNS its fitted final model as a second
+output, which Kedro persists via a PickleDataset declared in catalog.yml
+(data/06_models/<model>_<condition>.pkl). This replaces the previous
+`_save_model` filesystem side-effect, so the models are proper, catalog-
+tracked pipeline artifacts (reproducible, versionable, and visible in
+`kedro viz`) rather than files written out-of-band.
+
+Non-negativity: Crime Count can never be negative. Random Forest averages
+non-negative leaf values so it stays >= 0, but the boosting models add
+signed corrections and can overshoot below zero when lag/rolling features
+drift outside the trained range. The reported CV metrics clip predictions at
+0 (see `_run_walk_forward_cv`). The clip is NOT baked into the saved model
+object (that would stop shap.TreeExplainer recognising it as a native tree
+model), so any consumer calling `model.predict(...)` must apply the same
+`np.maximum(pred, 0)` clip -- the Streamlit Prediction Explorer already does.
 """
 from __future__ import annotations
 
 import logging
-import pickle
-from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Tuple
 
 import numpy as np
 import pandas as pd
@@ -33,31 +47,7 @@ logger = logging.getLogger(__name__)
 
 TARGET_COL = "Crime Count"
 DATE_COL = "date"
-MODELS_DIR = Path("data/06_models")
-
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-def _save_model(model, name: str) -> None:
-    """Pickle the fitted model as-is (NOT wrapped) so shap.TreeExplainer in
-    the dashboard's Feature Importance page still recognises it as a native
-    XGBoost/LightGBM/CatBoost/RandomForest object -- TreeExplainer does
-    isinstance-style checks that a generic Python wrapper would fail.
-
-    Because of that, the non-negative fix below (`y_pred = np.maximum(...)`)
-    is applied inside `_run_walk_forward_cv` for the reported metrics, but
-    it does NOT travel with the pickled artifact. Whatever code calls
-    `model.predict(...)` on these .pkl files in the Streamlit Predictions
-    Explorer needs the same one-line clip applied to its own output -- see
-    the note in the chat reply for exactly where that call needs to change.
-    """
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    path = MODELS_DIR / f"{name}.pkl"
-    with open(path, "wb") as f:
-        pickle.dump(model, f)
-    logger.info("Model saved -> %s", path)
+RANDOM_STATE = 42
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +118,9 @@ def _run_walk_forward_cv(
     model_builder: Callable,
     model_name: str,
     condition: str,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, object]:
+    """Run expanding-window CV, then refit on the full data for a deployable
+    model. Returns (per-fold metrics dataframe, fitted final model)."""
     df = df.copy()
     df[DATE_COL] = pd.to_datetime(df[DATE_COL])
     df = df.sort_values(DATE_COL).reset_index(drop=True)
@@ -149,22 +141,8 @@ def _run_walk_forward_cv(
 
         model = model_builder()
         model.fit(X_train, y_train)
-        y_pred = model.predict(X_val)
-
-        # Crime Count can never be negative. Random Forest can't produce
-        # negative predictions (each tree's leaf output is an average of
-        # non-negative training targets, so the forest average stays >= 0),
-        # but XGBoost/LightGBM/CatBoost are additive boosting models: each
-        # boosting round adds a *signed* correction on top of the running
-        # prediction, and that sum is not constrained to stay within the
-        # training target's range. In walk-forward CV this shows up worst
-        # in later folds, where lag/rolling features have drifted outside
-        # the range the trees were split on and the boosted sum overshoots
-        # below zero. Clip at the model's own output stage (not just before
-        # scoring) so every downstream consumer -- these metrics, the saved
-        # .pkl, and the Streamlit Predictions Explorer -- sees a physically
-        # valid, non-negative crime count.
-        y_pred = np.maximum(y_pred, 0.0)
+        # Clip at 0 -- Crime Count is physically non-negative (see module docstring).
+        y_pred = np.maximum(model.predict(X_val), 0.0)
 
         metrics = _regression_metrics(y_val, y_pred)
         metrics.update({
@@ -183,15 +161,21 @@ def _run_walk_forward_cv(
             metrics["rmse"], metrics["mae"], metrics["r2"], metrics["smape"],
         )
 
+    if not fold_metrics:
+        raise ValueError(
+            f"{model_name} [{condition}]: no usable folds -- every fold had an empty "
+            f"train or validation window. Check n_splits vs the number of distinct periods."
+        )
+
     fold_df = pd.DataFrame(fold_metrics)
 
     # Refit on the full dataset for a deployable model artifact.
     X_full, y_full = _split_X_y(df)
     final_model = model_builder()
     final_model.fit(X_full, y_full)
-    _save_model(final_model, f"{model_name.lower()}_{condition}")
+    logger.info("%s [%s] final model refit on full data (%d rows)", model_name, condition, len(df))
 
-    return fold_df
+    return fold_df, final_model
 
 
 # ---------------------------------------------------------------------------
@@ -199,82 +183,70 @@ def _run_walk_forward_cv(
 # ---------------------------------------------------------------------------
 
 def _rf_builder() -> RandomForestRegressor:
-    return RandomForestRegressor(n_estimators=300, max_depth=None, random_state=42, n_jobs=-1)
+    return RandomForestRegressor(n_estimators=300, max_depth=None, random_state=RANDOM_STATE, n_jobs=-1)
 
 
 def _xgb_builder() -> XGBRegressor:
     return XGBRegressor(
         n_estimators=300, learning_rate=0.05, max_depth=6,
-        random_state=42, n_jobs=-1, verbosity=0,
+        random_state=RANDOM_STATE, n_jobs=-1, verbosity=0,
     )
 
 
 def _lgbm_builder() -> LGBMRegressor:
     return LGBMRegressor(
         n_estimators=300, learning_rate=0.05, max_depth=-1,
-        random_state=42, n_jobs=-1, verbosity=-1,
+        random_state=RANDOM_STATE, n_jobs=-1, verbosity=-1,
     )
 
 
 def _catboost_builder() -> CatBoostRegressor:
     return CatBoostRegressor(
         iterations=300, learning_rate=0.05, depth=6,
-        random_state=42, verbose=False,
+        random_state=RANDOM_STATE, verbose=False,
     )
 
 
 # ---------------------------------------------------------------------------
-# Public nodes -- Random Forest
+# Public nodes -- each returns (per-fold results, fitted final model)
 # ---------------------------------------------------------------------------
 
-def train_evaluate_rf_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_rf_crime(crime_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_rf_crime ---")
     return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _rf_builder, "RandomForest", "crime_only")
 
 
-def train_evaluate_rf_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_rf_master(master_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_rf_master ---")
     return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _rf_builder, "RandomForest", "master")
 
 
-# ---------------------------------------------------------------------------
-# Public nodes -- XGBoost
-# ---------------------------------------------------------------------------
-
-def train_evaluate_xgb_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_xgb_crime(crime_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_xgb_crime ---")
     return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _xgb_builder, "XGBoost", "crime_only")
 
 
-def train_evaluate_xgb_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_xgb_master(master_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_xgb_master ---")
     return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _xgb_builder, "XGBoost", "master")
 
 
-# ---------------------------------------------------------------------------
-# Public nodes -- LightGBM
-# ---------------------------------------------------------------------------
-
-def train_evaluate_lgbm_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_lgbm_crime(crime_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_lgbm_crime ---")
     return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _lgbm_builder, "LightGBM", "crime_only")
 
 
-def train_evaluate_lgbm_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_lgbm_master(master_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_lgbm_master ---")
     return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _lgbm_builder, "LightGBM", "master")
 
 
-# ---------------------------------------------------------------------------
-# Public nodes -- CatBoost
-# ---------------------------------------------------------------------------
-
-def train_evaluate_catboost_crime(crime_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_catboost_crime(crime_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_catboost_crime ---")
     return _run_walk_forward_cv(crime_dataset_features, fold_boundaries, _catboost_builder, "CatBoost", "crime_only")
 
 
-def train_evaluate_catboost_master(master_dataset_features: pd.DataFrame, fold_boundaries: pd.DataFrame) -> pd.DataFrame:
+def train_evaluate_catboost_master(master_dataset_features, fold_boundaries):
     logger.info("--- train_evaluate_catboost_master ---")
     return _run_walk_forward_cv(master_dataset_features, fold_boundaries, _catboost_builder, "CatBoost", "master")
 

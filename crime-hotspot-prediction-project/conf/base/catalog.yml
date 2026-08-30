@@ -341,3 +341,44 @@ catboost_master_results:
     engine: openpyxl
   load_args:
     engine: openpyxl
+# --- 06_models: trained model artifacts (persisted via Kedro, not side-effects) ---
+# Filenames match what the Streamlit app expects: <model_lower>_<condition>.pkl
+rf_crime_only_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/randomforest_crime_only.pkl
+  backend: pickle
+
+rf_master_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/randomforest_master.pkl
+  backend: pickle
+
+xgb_crime_only_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/xgboost_crime_only.pkl
+  backend: pickle
+
+xgb_master_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/xgboost_master.pkl
+  backend: pickle
+
+lgbm_crime_only_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/lightgbm_crime_only.pkl
+  backend: pickle
+
+lgbm_master_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/lightgbm_master.pkl
+  backend: pickle
+
+catboost_crime_only_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/catboost_crime_only.pkl
+  backend: pickle
+
+catboost_master_model:
+  type: kedro_datasets.pickle.PickleDataset
+  filepath: data/06_models/catboost_master.pkl
+  backend: pickle

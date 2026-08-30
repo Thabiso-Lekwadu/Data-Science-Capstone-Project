@@ -39,7 +39,7 @@ def _sample_rows(features_json: str, n: int, seed: int = 42) -> pd.DataFrame:
 
 
 @st.cache_resource(show_spinner=False)
-def _make_explainer(_model):
+def _make_explainer(_model, model_key: str):
     return shap.TreeExplainer(_model)
 
 
@@ -114,7 +114,7 @@ def render(master_feat: pd.DataFrame, crime_feat: pd.DataFrame, uploaded_models:
 
     with st.spinner(f"Computing SHAP values for {model_name}..."):
         try:
-            explainer = _make_explainer(model)
+            explainer = _make_explainer(model, model_key=f"{model_name}:{condition}")
             shap_values = explainer.shap_values(X_sample)
         except Exception as e:
             st.error(f"SHAP computation failed for {model_name}: {e}")

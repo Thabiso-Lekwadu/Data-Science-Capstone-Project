@@ -1,4 +1,9 @@
-"""Model Training Pipeline."""
+"""Model Training Pipeline.
+
+Each train node emits two outputs: the per-fold results table (for reporting)
+and the fitted final model (persisted by Kedro as a PickleDataset declared in
+catalog.yml -> data/06_models/<model>_<condition>.pkl).
+"""
 from kedro.pipeline import Pipeline, node, pipeline
 
 from .model_training_nodes import (
@@ -36,14 +41,14 @@ def create_pipeline(**kwargs) -> Pipeline:
             node(
                 func=train_evaluate_rf_crime,
                 inputs=["crime_dataset_features", "fold_boundaries"],
-                outputs="rf_crime_results",
+                outputs=["rf_crime_results", "rf_crime_only_model"],
                 name="train_evaluate_rf_crime_node",
                 tags=["model_training", "random_forest", "crime_only"],
             ),
             node(
                 func=train_evaluate_rf_master,
                 inputs=["master_dataset_features", "fold_boundaries"],
-                outputs="rf_master_results",
+                outputs=["rf_master_results", "rf_master_model"],
                 name="train_evaluate_rf_master_node",
                 tags=["model_training", "random_forest", "master"],
             ),
@@ -52,14 +57,14 @@ def create_pipeline(**kwargs) -> Pipeline:
             node(
                 func=train_evaluate_xgb_crime,
                 inputs=["crime_dataset_features", "fold_boundaries"],
-                outputs="xgb_crime_results",
+                outputs=["xgb_crime_results", "xgb_crime_only_model"],
                 name="train_evaluate_xgb_crime_node",
                 tags=["model_training", "xgboost", "crime_only"],
             ),
             node(
                 func=train_evaluate_xgb_master,
                 inputs=["master_dataset_features", "fold_boundaries"],
-                outputs="xgb_master_results",
+                outputs=["xgb_master_results", "xgb_master_model"],
                 name="train_evaluate_xgb_master_node",
                 tags=["model_training", "xgboost", "master"],
             ),
@@ -68,14 +73,14 @@ def create_pipeline(**kwargs) -> Pipeline:
             node(
                 func=train_evaluate_lgbm_crime,
                 inputs=["crime_dataset_features", "fold_boundaries"],
-                outputs="lgbm_crime_results",
+                outputs=["lgbm_crime_results", "lgbm_crime_only_model"],
                 name="train_evaluate_lgbm_crime_node",
                 tags=["model_training", "lightgbm", "crime_only"],
             ),
             node(
                 func=train_evaluate_lgbm_master,
                 inputs=["master_dataset_features", "fold_boundaries"],
-                outputs="lgbm_master_results",
+                outputs=["lgbm_master_results", "lgbm_master_model"],
                 name="train_evaluate_lgbm_master_node",
                 tags=["model_training", "lightgbm", "master"],
             ),
@@ -84,14 +89,14 @@ def create_pipeline(**kwargs) -> Pipeline:
             node(
                 func=train_evaluate_catboost_crime,
                 inputs=["crime_dataset_features", "fold_boundaries"],
-                outputs="catboost_crime_results",
+                outputs=["catboost_crime_results", "catboost_crime_only_model"],
                 name="train_evaluate_catboost_crime_node",
                 tags=["model_training", "catboost", "crime_only"],
             ),
             node(
                 func=train_evaluate_catboost_master,
                 inputs=["master_dataset_features", "fold_boundaries"],
-                outputs="catboost_master_results",
+                outputs=["catboost_master_results", "catboost_master_model"],
                 name="train_evaluate_catboost_master_node",
                 tags=["model_training", "catboost", "master"],
             ),

@@ -124,54 +124,81 @@ def render(master_feat: pd.DataFrame, uploaded_models: dict, PALETTE: list, PLOT
     if st.button("Predict Crime Count", type="primary", key="pred_button"):
         X_row = build_input_row(feat_cols, cluster, crime_type, all_values)
 
-        preds, errors = {}, {}
+        preds, raw_preds, errors = {}, {}, {}
         for name, model in models.items():
             try:
                 X_aligned = align_features_to_model(X_row, model)
-                preds[name] = float(model.predict(X_aligned)[0])
+                # Explicit float64 cast — a single-row DataFrame built from a
+                # plain dict can end up with an object-dtype column, which
+                # LightGBM rejects outright ("DataFrame.dtypes must be int,
+                # float or bool"); harmless for the other three models.
+                X_aligned = X_aligned.astype(float)
+                raw = float(model.predict(X_aligned)[0])
+                raw_preds[name] = raw
+                # Crime Count is a non-negative integer — a plain regressor
+                # has no floor at zero and can extrapolate below it (this is
+                # what was showing up as XGBoost's negative predictions).
+                # Clipping and rounding here is what turns a raw regression
+                # output into an actual, reportable "specific crime count".
+                preds[name] = int(round(max(0.0, raw)))
             except Exception as e:
-                errors[name] = str(e)
+                import traceback
+                errors[name] = f"{e}\n\n{traceback.format_exc(limit=3)}"
 
         if errors:
             for name, err in errors.items():
-                st.warning(f"{name} failed to predict: {err}")
+                with st.expander(f"⚠️ {name} failed to predict — click for details"):
+                    st.code(err, language="text")
 
         if not preds:
             st.error("No model produced a prediction.")
             return
 
         pred_df = pd.DataFrame(list(preds.items()), columns=["Model", "Predicted Crime Count"])
+        pred_df["Raw Model Output"] = pred_df["Model"].map(raw_preds)
         pred_df = pred_df.sort_values("Predicted Crime Count", ascending=False)
 
-        k1, k2, k3 = st.columns(3)
-        vals = pred_df["Predicted Crime Count"]
-        k1.metric("Mean Prediction", f"{vals.mean():.0f}")
-        k2.metric("Spread (max − min)", f"{vals.max() - vals.min():.0f}")
-        k3.metric("Models Agreeing", f"{len(preds)} / {len(models)}")
+        clipped = {n: r for n, r in raw_preds.items() if r < 0}
+        if clipped:
+            rows_html = "".join(
+                f"<li><b>{n}</b>: raw output {r:.2f} → floored to 0</li>" for n, r in clipped.items()
+            )
+            st.markdown(f"""
+            <div class="stat-card" style="border-color:#e9c46a;">
+              <span class="badge-high">CLIPPED PREDICTION{'S' if len(clipped) > 1 else ''}</span>
+              <p style="font-size:0.82rem;color:#8892a4;margin:10px 0 0;line-height:1.7;">
+                {len(clipped)} of {len(pred_df)} model(s) actually predicted a <b>negative</b> raw value
+                for this scenario, floored to 0 for display:
+                <ul style="margin:6px 0 0 18px;">{rows_html}</ul>
+                A large negative raw value (e.g. below −5 or so) usually means the model is
+                extrapolating outside what it saw in training — most often because the lag/rolling
+                Crime Count features above defaulted to 0 (no history for this Cluster/Type pairing)
+                and/or the target year is beyond the training data's range. A "0" here isn't
+                necessarily a confident "no crime expected" — check the raw value and the feature
+                row below before reporting it as such.
+              </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown(f'<div class="section-label">Predicted Crime Count — {cluster} / {crime_type} / {int(year)}</div>',
+                    unsafe_allow_html=True)
+        cols = st.columns(len(pred_df))
+        for c, (_, row_) in zip(cols, pred_df.iterrows()):
+            raw_val = row_["Raw Model Output"]
+            delta = f"raw: {raw_val:.2f}" if raw_val < 0 else None
+            c.metric(row_["Model"], f"{row_['Predicted Crime Count']:,} incidents", delta=delta, delta_color="off")
 
         fig = go.Figure(go.Bar(
             x=pred_df["Model"], y=pred_df["Predicted Crime Count"],
             marker_color=PALETTE[:len(pred_df)],
-            text=pred_df["Predicted Crime Count"].round(0),
+            text=pred_df["Predicted Crime Count"],
             textposition="outside", textfont=dict(color="#566174"),
         ))
         _upd(fig, PLOT_BASE, height=380,
              title=f"Predicted Crime Count — {cluster} / {crime_type} / {int(year)}")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown('<div class="section-label">Predictions by Model</div>', unsafe_allow_html=True)
-        st.dataframe(pred_df.reset_index(drop=True), use_container_width=True)
-
-        if vals.max() - vals.min() > vals.mean() * 0.5:
-            st.markdown("""
-            <div class="stat-card">
-              <span class="badge-high">HIGH DISAGREEMENT</span>
-              <span style="font-size:0.83rem;color:#8892a4;margin-left:10px;">
-                Models disagree by more than 50% of the mean prediction — this scenario may be
-                outside what any model saw much of during training. Treat the estimate with caution.
-              </span>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with st.expander("Show the exact feature row sent to the models"):
+        with st.expander("Show raw vs. floored predictions, and the exact feature row sent to the models"):
+            st.dataframe(pred_df[["Model", "Raw Model Output", "Predicted Crime Count"]]
+                        .reset_index(drop=True), use_container_width=True)
             st.dataframe(X_row.T.rename(columns={0: "value"}), use_container_width=True)

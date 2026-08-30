@@ -1,22 +1,65 @@
-# Existing display-name parameters (kept — used elsewhere for reporting labels)
+# =============================================================================
+# conf/base/parameters.yml
+# =============================================================================
+
+# Display-name parameters (used for reporting labels).
 name_ct: "Crime Only - Tree"
 name_ck: "Crime Only - KNN"
 name_mt: "Master Enriched - Tree"
 name_mk: "Master Enriched - KNN"
 
-# --- Feature engineering: time-series lag/rolling window sizes ---
+# --- Data cleaning: SAPS aggregate / roll-up categories to exclude ------------
+# The raw SAPS feed mixes GRANULAR crime types (Murder, Rape, Burglary…) with
+# AGGREGATE roll-ups that are themselves sums of those granular rows. Modelling
+# 'Crime Count' over a target that contains both a category and its own subtotal
+# is a data-integrity problem (the same incidents counted at two granularities),
+# so these roll-ups and the deprecated 'Old *' categories are dropped before
+# feature engineering.
+#
+# This is a REVIEWABLE domain choice, not a hard rule — check it against the
+# current SAPS crime taxonomy for your write-up and adjust as needed. Matching
+# is on the whitespace-stripped label.
+excluded_crime_types:
+  # Top-level SAPS roll-ups (sums of other rows)
+  - "Serious and Other crimes"
+  - "Serious crimes"
+  - "Contact crimes (Crimes against the person)"
+  - "Contact-related crimes"
+  - "Property-related crimes"
+  - "Other serious crimes"
+  - "Other crime categories"
+  - "Community reported Serious crimes"
+  - "Crime detected as a result of police action (CDPA)"
+  - "Sexual Offences (also see SDS)"
+  - "Sexual Offences detected as a result of police action"
+  - "TRIO Crimes"
+  - "Robbery with aggravating circumstances"
+  # Deprecated legacy categories (superseded by current equivalents)
+  - "Old Abduction"
+  - "Old Indecent Assault"
+  - "Old Rape and Attempted Rape"
+  - "Old Subcategories of Aggravated Robbery"
+
+# --- Feature engineering: time-series lag/rolling window sizes ----------------
 # Expressed in units of the underlying series frequency (the API sources are
 # pulled at annual frequency — see catalog.yml `freq: "A"` — so lag_periods: [1, 2, 3]
 # means 1, 2, and 3 years back). Adjust if your ingestion frequency changes.
 lag_periods: [1, 2, 3]
 rolling_windows: [3, 5]
 
-# --- Model training: walk-forward (expanding-window) CV ---
+# --- Model training: walk-forward (expanding-window) CV ----------------------
 # Number of validation folds. Fold boundaries are computed once from
 # master_dataset_features's date range (see compute_fold_boundaries) and
 # reused for crime_dataset_features, so both conditions are evaluated on
 # identical validation windows and their per-fold RMSEs are paired.
+#
+# The dataset spans ~16 distinct annual periods after the lag warm-up rows are
+# dropped, so 5 folds is safe and gives the paired significance test in
+# run_paired_significance_tests real statistical power (n=5 paired folds).
+# The previous value of 2 left the t-test with a single degree of freedom —
+# effectively no power to detect whether socioeconomic enrichment helps.
+#
 # NOTE: with annual data you need at least n_splits + 1 distinct years of
-# history after the lag warm-up rows are dropped — if this errors with
+# history after the warm-up rows are dropped — if this errors with
 # "not enough distinct periods", lower n_splits.
-n_splits: 2
+n_splits: 5

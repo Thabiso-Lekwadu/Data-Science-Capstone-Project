@@ -109,7 +109,7 @@ with st.sidebar:
         "SHAP Feature Importance",
         "Model Performance",
         "Prediction Explorer",
-    ])
+    ], key="nav_page")
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Data Sources</div>', unsafe_allow_html=True)
@@ -134,36 +134,59 @@ with st.sidebar:
              "Crime Count, socioeconomic columns), BEFORE feature engineering. "
              "Powers Exploratory Analysis directly, and is automatically feature-engineered "
              "in-app (one-hot + lag/rolling) to power SHAP and Prediction Explorer for the "
-             "'master' condition — you do not need a second, pre-engineered upload for this.")
+             "'master' condition — you do not need a second, pre-engineered upload for this.",
+        key="up_master")
     up_crime_only = st.file_uploader(
         "② Crime-only dataset", type=["xlsx", "csv"],
         help="crime_processed.xlsx — same shape as ① but without socioeconomic columns. "
              "A genuinely different dataset (the baseline condition), not a duplicate of ①. "
              "Powers Exploratory Analysis and, engineered in-app, the 'crime_only' condition "
-             "on SHAP and Prediction Explorer.")
+             "on SHAP and Prediction Explorer.",
+        key="up_crime_only")
 
     st.markdown('<div class="section-label" style="margin-top:14px;">Trained Models</div>', unsafe_allow_html=True)
     up_models = st.file_uploader(
         "③ Model files (.pkl)", type=["pkl"], accept_multiple_files=True,
         help="Upload the .pkl files from your Kedro run's data/06_models/ — e.g. "
              "randomforest_master.pkl, xgboost_crime_only.pkl. Matched automatically by "
-             "filename. Needed for SHAP and Prediction Explorer.")
+             "filename. Needed for SHAP and Prediction Explorer.",
+        key="up_models")
 
     st.markdown('<div class="section-label" style="margin-top:14px;">CV Results</div>', unsafe_allow_html=True)
     up_per_fold = st.file_uploader(
         "④ Per-fold CV results", type=["xlsx", "csv"],
-        help="experiment_results_per_fold.xlsx. Powers Model Performance.")
+        help="experiment_results_per_fold.xlsx. Powers Model Performance.", key="up_per_fold")
     up_summary = st.file_uploader(
         "⑤ CV summary", type=["xlsx", "csv"],
-        help="experiment_results_summary.xlsx. Powers Model Performance.")
+        help="experiment_results_summary.xlsx. Powers Model Performance.", key="up_summary")
     up_sig = st.file_uploader(
         "⑥ Significance tests", type=["xlsx", "csv"],
-        help="experiment_significance_tests.xlsx. Powers Model Performance.")
+        help="experiment_significance_tests.xlsx. Powers Model Performance.", key="up_sig")
 
-    if st.button("🗑 Clear everything", help="Drops all cached uploads/computations for this session."):
+    if st.button("🗑 Clear everything", help="Drops all cached uploads/computations for this session.",
+                 key="btn_clear_all"):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
+
+    st.markdown('<div class="section-label" style="margin-top:14px;">Feature Engineering Parameters</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:0.7rem;color:#566174;line-height:1.5;margin-bottom:4px;">'
+        'Must match <code>lag_periods</code> / <code>rolling_windows</code> in the Kedro '
+        '<code>parameters.yml</code> used to train the uploaded models — otherwise the '
+        'in-app feature matrix silently mismatches what the models were trained on, and '
+        'SHAP values / predictions will be wrong with no error raised.</p>', unsafe_allow_html=True)
+    lags_raw = st.text_input("Lag periods (comma-separated)", value="1,2,3", key="fe_lags")
+    rolling_raw = st.text_input("Rolling windows (comma-separated)", value="3,5", key="fe_rolling")
+    try:
+        lag_periods = tuple(sorted({int(x.strip()) for x in lags_raw.split(",") if x.strip()}))
+        rolling_windows = tuple(sorted({int(x.strip()) for x in rolling_raw.split(",") if x.strip()}))
+        if not lag_periods or not rolling_windows:
+            raise ValueError("at least one lag and one rolling window are required")
+    except ValueError as e:
+        st.sidebar.error(f"Feature engineering parameters: {e}. Falling back to defaults (1,2,3 / 3,5).")
+        lag_periods, rolling_windows = (1, 2, 3), (3, 5)
 
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
     st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#2a3347;padding-bottom:8px;">v3.0 — Capstone Project (upload-only)</div>', unsafe_allow_html=True)
@@ -271,13 +294,13 @@ if master_df is not None:
     if err:
         st.sidebar.error(f"Master dataset: {err}")
     else:
-        master_feat = engineer_features(master_df.to_json())
+        master_feat = engineer_features(master_df.to_json(), lags=lag_periods, rolling_windows=rolling_windows)
 if crime_only_df is not None:
     err = required_raw_columns_present(crime_only_df)
     if err:
         st.sidebar.error(f"Crime-only dataset: {err}")
     else:
-        crime_feat = engineer_features(crime_only_df.to_json())
+        crime_feat = engineer_features(crime_only_df.to_json(), lags=lag_periods, rolling_windows=rolling_windows)
 
 # Visible, page-agnostic proof of what's actually driving the charts right now.
 _SOURCE_ROWS = [
@@ -327,23 +350,23 @@ def _gate(ready: bool, needed: str) -> bool:
 if page == "Exploratory Analysis":
     if _gate(master_df is not None or crime_only_df is not None,
              "① master dataset (or at least ② crime-only dataset)"):
-        from pages_eda import render
+        from views.eda import render
         render(master_df, crime_only_df, PALETTE, PLOT_BASE)
 
 elif page == "SHAP Feature Importance":
     if _gate(master_feat is not None or crime_feat is not None,
              "① master dataset (or ② crime-only dataset) — features are engineered automatically"):
-        from pages_shap import render
+        from views.shap import render
         render(master_feat, crime_feat, all_models, PALETTE, PLOT_BASE, MODEL_NAMES, CONDITIONS)
 
 elif page == "Model Performance":
     if _gate(per_fold_df is not None and summary_df is not None,
              "④ per-fold CV results + ⑤ CV summary"):
-        from pages_model import render
+        from views.model import render
         render(per_fold_df, summary_df, sig_df, PALETTE, PLOT_BASE, MODEL_NAMES, CONDITIONS)
 
 else:  # Prediction Explorer
     if _gate(master_feat is not None,
              "① master dataset — features are engineered automatically"):
-        from pages_predict import render
+        from views.predict import render
         render(master_feat, all_models, PALETTE, PLOT_BASE)

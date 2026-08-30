@@ -25,9 +25,20 @@ def register_pipelines() -> dict[str, Pipeline]:
         "model_training": model_training.create_pipeline(),
     }
 
+    # Full pipeline including the Quantec API pull (needs credentials).
     pipelines["__default__"] = (
         pipelines["data_ingestion"]
         + pipelines["data_preprocessing"]
+        + pipelines["feature_engineering"]
+        + pipelines["model_training"]
+    )
+
+    # Offline pipeline: everything EXCEPT the API ingestion. Runs from the
+    # already-materialised data/01_raw/*.xlsx files, so it needs no API
+    # credentials and no network. This is what the Docker `pipeline` service
+    # runs on `docker compose up`.
+    pipelines["training_from_raw"] = (
+        pipelines["data_preprocessing"]
         + pipelines["feature_engineering"]
         + pipelines["model_training"]
     )

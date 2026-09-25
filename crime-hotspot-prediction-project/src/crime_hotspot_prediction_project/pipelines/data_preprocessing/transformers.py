@@ -17,16 +17,6 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 
 class preprocess(BaseEstimator, TransformerMixin):
-    """Drop metadata columns and coerce ``value`` to a clean non-negative int.
-
-    ``value`` arrives as a float (Quantec standardised figures, e.g.
-    4965.21). Previously this used ``df.fillna(0)["value"].astype(int)``,
-    which (a) built a throwaway full-frame copy just to fill one column and
-    (b) *truncated* rather than rounded (4965.9 -> 4965). We now coerce
-    non-numeric junk to NaN, fill with 0, round, and clip at 0 so a crime
-    count can never be negative.
-    """
-
     def fit(self, X, y=None):
         return self
 
@@ -41,6 +31,7 @@ class preprocess(BaseEstimator, TransformerMixin):
             df["value"] = value.round().clip(lower=0).astype("int64")
             processed_dfs.append(df)
         return pd.concat(processed_dfs, ignore_index=True)
+
 
 
 class table_structure(BaseEstimator, TransformerMixin):
